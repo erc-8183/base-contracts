@@ -1,9 +1,26 @@
-node_modules
-cache
-artifacts
-typechain-types
-coverage
+# Dependencies
+node_modules/
+
+# Build / cache
+artifacts/
+cache/
+typechain-types/
+coverage/
 coverage.json
+
+# Env
 .env
+.env.*
+
+# OpenZeppelin
 .openzeppelin/
-refs
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
