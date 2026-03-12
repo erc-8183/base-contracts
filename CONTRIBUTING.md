@@ -11,17 +11,13 @@ Contributions are welcome — whether that's bug fixes, security improvements, o
 
 ## Proposing changes to the standard
 
-If your contribution changes the behavior or interface of the protocol (not just implementation
-details), please open an issue first to discuss the rationale before submitting a supporting PR.
+If your contribution changes the behavior or interface of the protocol (not just implementation details), please open an issue first to discuss the rationale before submitting a supporting PR.
 
 ## Contribution process
 
 ### Code reviews
 
-All submissions, including submissions by project members, require review. We
-use GitHub pull requests for this purpose. Consult
-[GitHub Help](https://help.github.com/articles/about-pull-requests/) for more
-information on using pull requests.
+All submissions, including submissions by project members, require review. We use GitHub pull requests for this purpose. Consult [GitHub Help](https://help.github.com/articles/about-pull-requests/) for more information on using pull requests.
 
 ### Contributor Guide
 
