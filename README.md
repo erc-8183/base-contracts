@@ -64,8 +64,8 @@ See [docs/01-architecture.md](docs/01-architecture.md) for state machine and seq
 
 ## Contributing
 
-This is the reference implementation for ERC-8183. Contributions, feedback, and discussion are welcome — open an issue or pull request.
+This is the reference implementation for ERC-8183. Contributions, feedback, and discussion are welcome - please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on how to get started.
 
 ## License
 
-CC0-1.0
+MIT
