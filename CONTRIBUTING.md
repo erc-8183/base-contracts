@@ -1,6 +1,18 @@
-# How to contribute
+# Contributing to ERC-8183                                                                                                           
+   
+This repository contains the **reference implementation** of [ERC-8183](https://eips.ethereum.org/EIPS/eip-8183).                                   
+It serves as the canonical codebase for the standard and a starting point for proposals to improve it.
 
-We'd love to accept your patches and contributions to this project.
+Contributions are welcome — whether that's bug fixes, security improvements, or proposals that evolve the standard itself (e.g., changes to the job lifecycle, fee mechanics, or core interface).
+
+> **Looking to contribute or explore hook implementations?**
+> Hook contracts for different applications and use cases live in a separate repository:
+> [erc-8183/hook-contracts](https://github.com/erc-8183/hook-contracts)
+
+## Proposing changes to the standard
+
+If your contribution changes the behavior or interface of the protocol (not just implementation
+details), please open an issue first to discuss the rationale before submitting a supporting PR.
 
 ## Contribution process
 

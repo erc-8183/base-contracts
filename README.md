@@ -1,6 +1,6 @@
-# ERC-8183: Agentic Commerce Protocol
+# ERC-8183: Agentic Commerce
 
-Reference implementation of [ERC-8183](https://eips.ethereum.org/EIPS/eip-8183) — a job escrow protocol with evaluator attestation and an optional hook system for extensibility.
+Reference implementation of [ERC-8183](https://eips.ethereum.org/EIPS/eip-8183) — a Job primitive for trustless agent commerce. Its core features are a job escrow protocol with evaluator attestation and an optional hook system for extensibility.
 
 ## Quick Start
 

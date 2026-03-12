@@ -1,6 +1,6 @@
 # ERC-8183 Maintainers
 
-This document lists current maintainers in the Model Context Protocol project.
+This document lists current maintainers of the ERC-8183 standard.
 
 **Last updated:** March 12, 2026
 
@@ -15,6 +15,7 @@ This document lists current maintainers in the Model Context Protocol project.
 - [Chooi Zuhwa](https://github.com/Zuhwa)
 - [Brianna Chang](https://github.com/psmiratisu)
 - [Celeste Ang](https://github.com/celesteanglm)
+- [Vitto Rivabella](https://github.com/eversmile12)
 
 ## About This Document
 
