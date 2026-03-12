@@ -1,4 +1,4 @@
-# MCP Maintainers
+# ERC-8183 Maintainers
 
 This document lists current maintainers in the Model Context Protocol project.
 
