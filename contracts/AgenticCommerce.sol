@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: CC0-1.0
+// SPDX-License-Identifier: MIT
 // ERC-8183: Agentic Commerce Protocol — Reference Implementation
 pragma solidity ^0.8.28;
 
