@@ -117,6 +117,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
     error ProviderNotSet();
     error FeesTooHigh();
     error HookNotWhitelisted();
+    error BudgetMismatch();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -284,6 +285,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
 
     function fund(
         uint256 jobId,
+        uint256 expectedBudget,
         bytes calldata optParams
     ) external nonReentrant {
         Job storage job = jobs[jobId];
@@ -291,6 +293,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         if (job.status != JobStatus.Open) revert WrongStatus();
         if (msg.sender != job.client) revert Unauthorized();
         if (job.provider == address(0)) revert ProviderNotSet();
+        if (job.budget != expectedBudget) revert BudgetMismatch();
         if (block.timestamp >= job.expiredAt) revert WrongStatus();
 
         bytes memory data = abi.encode(msg.sender, optParams);

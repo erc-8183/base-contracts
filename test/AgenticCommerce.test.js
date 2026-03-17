@@ -81,8 +81,8 @@ describe("Image Generation", function () {
     expect((await core.getJob(jobId2)).paymentToken).to.equal(cbbtcAddr);
 
     // Fund both
-    await core.connect(client).fund(jobId1, "0x");
-    await core.connect(client).fund(jobId2, "0x");
+    await core.connect(client).fund(jobId1, TWENTY_USDC_AMT, "0x");
+    await core.connect(client).fund(jobId2, ONE_CBBTC, "0x");
 
     // Both escrowed correctly
     expect(await usdc.balanceOf(coreAddr)).to.equal(TWENTY_USDC_AMT);
@@ -181,7 +181,7 @@ describe("Image Generation", function () {
     // ──────────────────────────────────────────────────────────
     expect(await usdc.balanceOf(client.address)).to.equal(TWENTY_USDC);
 
-    await expect(core.connect(client).fund(jobId, "0x"))
+    await expect(core.connect(client).fund(jobId, TWENTY_USDC, "0x"))
       .to.emit(core, "JobFunded")
       .withArgs(jobId, client.address, TWENTY_USDC);
 
