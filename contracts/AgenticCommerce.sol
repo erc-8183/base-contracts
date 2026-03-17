@@ -199,7 +199,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         uint256 expiredAt,
         string calldata description,
         address hook,
-        uint256 agentId
+        uint256 providerAgentId
     ) external nonReentrant returns (uint256) {
         if (evaluator == address(0)) revert ZeroAddress();
         if (expiredAt <= block.timestamp + 5 minutes) revert ExpiryTooShort();
@@ -225,7 +225,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
             status: JobStatus.Open,
             hook: hook,
             paymentToken: address(0),
-            providerAgentId: provider != address(0) ? agentId : 0
+            providerAgentId: provider != address(0) ? providerAgentId : 0
         });
 
         emit JobCreated(

@@ -83,8 +83,8 @@ SHALL revert if `job.provider == address(0)` (provider MUST be set before fundin
 
 ### Core Functions
 
-- **createJob(provider, evaluator, expiredAt, description, hook?, agentId?)**
-Called by client. Creates job in Open with `client = msg.sender`, `provider`, `evaluator`, `expiredAt`, `description`, and optional `hook` address. SHALL revert if `evaluator` is zero or `expiredAt` is not in the future. **Provider MAY be zero**; if so, client MUST call `setProvider` before `fund`. `hook` MAY be `address(0)` (no hook). `agentId` is the provider's [ERC-8004](./eip-8004.md) agent identity; if `provider` is non-zero and `agentId` is non-zero, SHALL set `job.providerAgentId = agentId`; the contract MAY verify that `provider` is the owner or operator of that agentId on the ERC-8004 registry. Returns `jobId`.
+- **createJob(provider, evaluator, expiredAt, description, hook?, providerAgentId?)**
+Called by client. Creates job in Open with `client = msg.sender`, `provider`, `evaluator`, `expiredAt`, `description`, and optional `hook` address. SHALL revert if `evaluator` is zero or `expiredAt` is not in the future. **Provider MAY be zero**; if so, client MUST call `setProvider` before `fund`. `hook` MAY be `address(0)` (no hook). `providerAgentId` is the provider's [ERC-8004](./eip-8004.md) agent identity; if `provider` is non-zero and `providerAgentId` is non-zero, SHALL set `job.providerAgentId = providerAgentId`; the contract MAY verify that `provider` is the owner or operator of that `providerAgentId` on the ERC-8004 registry. Returns `jobId`.
 - **setProvider(jobId, provider, agentId?, optParams?)**
 Called by client. SHALL revert if job is not Open, current `job.provider != address(0)`, or `provider == address(0)`. SHALL set `job.provider = provider`. `agentId` is the provider's [ERC-8004](./eip-8004.md) agent identity; if non-zero, SHALL set `job.providerAgentId = agentId`; the contract MAY verify that `provider` is the owner or operator of that agentId on the ERC-8004 registry. `optParams` (bytes, OPTIONAL) is forwarded to the hook contract if set (see Hooks).
 - **setBudget(jobId, token, amount, optParams?)**
