@@ -47,9 +47,10 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         uint256 expiredAt;
         JobStatus status;
         address hook;
+        address paymentToken;
+        uint256 providerAgentId; // Optional ERC-8004 agent identity
     }
 
-    IERC20 public paymentToken;
     uint256 public platformFeeBP; // 10000 = 100%
     address public platformTreasury;
     uint256 public evaluatorFeeBP;
@@ -67,8 +68,8 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         uint256 expiredAt,
         address hook
     );
-    event ProviderSet(uint256 indexed jobId, address indexed provider);
-    event BudgetSet(uint256 indexed jobId, uint256 amount);
+    event ProviderSet(uint256 indexed jobId, address indexed provider, uint256 agentId);
+    event BudgetSet(uint256 indexed jobId, address indexed token, uint256 amount);
     event JobFunded(
         uint256 indexed jobId,
         address indexed client,
@@ -122,13 +123,12 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         _disableInitializers();
     }
 
-    function initialize(address paymentToken_, address treasury_) public initializer {
-        if (paymentToken_ == address(0) || treasury_ == address(0))
+    function initialize(address treasury_) public initializer {
+        if (treasury_ == address(0))
             revert ZeroAddress();
 
         __AccessControl_init();
 
-        paymentToken = IERC20(paymentToken_);
         platformTreasury = treasury_;
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(ADMIN_ROLE, msg.sender);
@@ -198,7 +198,8 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         address evaluator,
         uint256 expiredAt,
         string calldata description,
-        address hook
+        address hook,
+        uint256 agentId
     ) external nonReentrant returns (uint256) {
         if (evaluator == address(0)) revert ZeroAddress();
         if (expiredAt <= block.timestamp + 5 minutes) revert ExpiryTooShort();
@@ -222,7 +223,9 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
             budget: 0,
             expiredAt: expiredAt,
             status: JobStatus.Open,
-            hook: hook
+            hook: hook,
+            paymentToken: address(0),
+            providerAgentId: provider != address(0) ? agentId : 0
         });
 
         emit JobCreated(
@@ -244,7 +247,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         return jobId;
     }
 
-    function setProvider(uint256 jobId, address provider_) external {
+    function setProvider(uint256 jobId, address provider_, uint256 agentId) external {
         Job storage job = jobs[jobId];
         if (job.id == 0) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
@@ -252,24 +255,28 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         if (job.provider != address(0)) revert WrongStatus();
         if (provider_ == address(0)) revert ZeroAddress();
         job.provider = provider_;
-        emit ProviderSet(jobId, provider_);
+        job.providerAgentId = agentId;
+        emit ProviderSet(jobId, provider_, agentId);
     }
 
     function setBudget(
         uint256 jobId,
+        address token,
         uint256 amount,
         bytes calldata optParams
     ) external nonReentrant {
         Job storage job = jobs[jobId];
         if (job.id == 0) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
-        if (msg.sender != job.provider) revert Unauthorized();
+        if (msg.sender != job.client && msg.sender != job.provider) revert Unauthorized();
+        if (token == address(0)) revert ZeroAddress();
 
-        bytes memory data = abi.encode(msg.sender, amount, optParams);
+        bytes memory data = abi.encode(msg.sender, token, amount, optParams);
         _beforeHook(job.hook, jobId, msg.sig, data);
 
+        job.paymentToken = token;
         job.budget = amount;
-        emit BudgetSet(jobId, amount);
+        emit BudgetSet(jobId, token, amount);
         jobHasBudget[jobId] = true;
 
         _afterHook(job.hook, jobId, msg.sig, data);
@@ -291,7 +298,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
 
         job.status = JobStatus.Funded;
         if (job.budget > 0) {
-            paymentToken.safeTransferFrom(
+            IERC20(job.paymentToken).safeTransferFrom(
                 job.client,
                 address(this),
                 job.budget
@@ -344,15 +351,16 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         uint256 evalFee = (amount * evaluatorFeeBP) / 10000;
         uint256 net = amount - platformFee - evalFee;
 
+        IERC20 token = IERC20(job.paymentToken);
         if (platformFee > 0) {
-            paymentToken.safeTransfer(platformTreasury, platformFee);
+            token.safeTransfer(platformTreasury, platformFee);
         }
         if (evalFee > 0) {
-            paymentToken.safeTransfer(job.evaluator, evalFee);
+            token.safeTransfer(job.evaluator, evalFee);
             emit EvaluatorFeePaid(jobId, job.evaluator, evalFee);
         }
         if (net > 0) {
-            paymentToken.safeTransfer(job.provider, net);
+            token.safeTransfer(job.provider, net);
         }
 
         emit JobCompleted(jobId, job.evaluator, reason);
@@ -389,7 +397,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
             (prev == JobStatus.Funded || prev == JobStatus.Submitted) &&
             job.budget > 0
         ) {
-            paymentToken.safeTransfer(job.client, job.budget);
+            IERC20(job.paymentToken).safeTransfer(job.client, job.budget);
             emit Refunded(jobId, job.client, job.budget);
         }
 
@@ -408,7 +416,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         job.status = JobStatus.Expired;
 
         if (job.budget > 0) {
-            paymentToken.safeTransfer(job.client, job.budget);
+            IERC20(job.paymentToken).safeTransfer(job.client, job.budget);
             emit Refunded(jobId, job.client, job.budget);
         }
 

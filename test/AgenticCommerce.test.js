@@ -31,7 +31,7 @@ describe("Image Generation", function () {
 
     // Deploy core (AgenticCommerce)
     const Core = await ethers.getContractFactory("AgenticCommerce");
-    const core = await upgrades.deployProxy(Core, [await usdc.getAddress(), deployer.address], { kind: 'uups' });
+    const core = await upgrades.deployProxy(Core, [deployer.address], { kind: 'uups' });
 
     // Mint USDC to client
     await usdc.mint(client.address, TWENTY_USDC);
@@ -63,7 +63,8 @@ describe("Image Generation", function () {
         evaluator.address,
         expiry,
         "Generate a beautiful landscape wallpaper image",
-        hookAddr
+        hookAddr,
+        0 // no ERC-8004 agentId
       );
 
     const jobId = 1n;
@@ -78,9 +79,10 @@ describe("Image Generation", function () {
     // ──────────────────────────────────────────────────────────
     // Step 2: Provider sets budget to 20 USDC
     // ──────────────────────────────────────────────────────────
-    await expect(core.connect(provider).setBudget(jobId, TWENTY_USDC, "0x"))
+    const usdcAddr = await usdc.getAddress();
+    await expect(core.connect(provider).setBudget(jobId, usdcAddr, TWENTY_USDC, "0x"))
       .to.emit(core, "BudgetSet")
-      .withArgs(jobId, TWENTY_USDC);
+      .withArgs(jobId, usdcAddr, TWENTY_USDC);
 
     expect((await core.getJob(jobId)).budget).to.equal(TWENTY_USDC);
 
