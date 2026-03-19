@@ -245,7 +245,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
 
     function setProvider(uint256 jobId, address provider_) external {
         Job storage job = jobs[jobId];
-        if (job.id == 0) revert InvalidJob();
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
         if (msg.sender != job.client) revert Unauthorized();
         if (job.provider != address(0)) revert WrongStatus();
@@ -260,7 +260,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         bytes calldata optParams
     ) external nonReentrant {
         Job storage job = jobs[jobId];
-        if (job.id == 0) revert InvalidJob();
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
         if (msg.sender != job.provider) revert Unauthorized();
 
@@ -278,7 +278,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         bytes calldata optParams
     ) external nonReentrant {
         Job storage job = jobs[jobId];
-        if (job.id == 0) revert InvalidJob();
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
         if (msg.sender != job.client) revert Unauthorized();
         if (job.provider == address(0)) revert ProviderNotSet();
@@ -306,7 +306,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         bytes calldata optParams
     ) external nonReentrant {
         Job storage job = jobs[jobId];
-        if (job.id == 0) revert InvalidJob();
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (
             job.status != JobStatus.Funded &&
             (job.status != JobStatus.Open || job.budget > 0) // Allow Open job with 0 budget to be submitted
@@ -328,7 +328,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         bytes calldata optParams
     ) external nonReentrant {
         Job storage job = jobs[jobId];
-        if (job.id == 0) revert InvalidJob();
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Submitted) revert WrongStatus();
         if (msg.sender != job.evaluator) revert Unauthorized();
 
@@ -365,7 +365,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         bytes calldata optParams
     ) external nonReentrant {
         Job storage job = jobs[jobId];
-        if (job.id == 0) revert InvalidJob();
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
 
         if (job.status == JobStatus.Open) {
             if (msg.sender != job.client) revert Unauthorized();
@@ -398,7 +398,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
 
     function claimRefund(uint256 jobId) external nonReentrant {
         Job storage job = jobs[jobId];
-        if (job.id == 0) revert InvalidJob();
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Funded && job.status != JobStatus.Submitted)
             revert WrongStatus();
         if (block.timestamp < job.expiredAt) revert WrongStatus();
