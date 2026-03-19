@@ -112,6 +112,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
     event HookWhitelistUpdated(address indexed hook, bool status);
 
     error InvalidJob();
+    error InvalidHook();
     error WrongStatus();
     error Unauthorized();
     error ZeroAddress();
@@ -213,7 +214,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
                     hook,
                     type(IACPHook).interfaceId
                 )
-            ) revert InvalidJob();
+            ) revert InvalidHook();
         }
 
         uint256 jobId = ++jobCounter;
