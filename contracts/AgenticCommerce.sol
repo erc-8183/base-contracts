@@ -94,6 +94,11 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         address indexed provider,
         uint256 amount
     );
+    event PlatformFeePaid(
+        uint256 indexed jobId,
+        address indexed platformTreasury,
+        uint256 amount
+    );
     event EvaluatorFeePaid(
         uint256 indexed jobId,
         address indexed evaluator,
@@ -344,6 +349,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
 
         if (platformFee > 0) {
             paymentToken.safeTransfer(platformTreasury, platformFee);
+            emit PlatformFeePaid(jobId, platformTreasury, platformFee);
         }
         if (evalFee > 0) {
             paymentToken.safeTransfer(job.evaluator, evalFee);
