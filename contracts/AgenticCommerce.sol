@@ -110,6 +110,8 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         uint256 amount
     );
     event HookWhitelistUpdated(address indexed hook, bool status);
+    event PlatformFeeSet(uint256 feeBP, address indexed treasury);
+    event EvaluatorFeeSet(uint256 feeBP);
 
     error InvalidJob();
     error InvalidHook();
@@ -153,11 +155,13 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         if (feeBP_ + evaluatorFeeBP > 10000) revert FeesTooHigh();
         platformFeeBP = feeBP_;
         platformTreasury = treasury_;
+        emit PlatformFeeSet(feeBP_, treasury_);
     }
 
     function setEvaluatorFee(uint256 feeBP_) external onlyRole(ADMIN_ROLE) {
         if (feeBP_ + platformFeeBP > 10000) revert FeesTooHigh();
         evaluatorFeeBP = feeBP_;
+        emit EvaluatorFeeSet(feeBP_);
     }
 
     /// @notice Whitelist or remove a hook contract
