@@ -57,7 +57,6 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
     mapping(uint256 => Job) public jobs;
     uint256 public jobCounter;
     mapping(address => bool) public whitelistedHooks;
-    mapping(uint256 jobId => bool hasBudget) public jobHasBudget;
 
     event JobCreated(
         uint256 indexed jobId,
@@ -270,7 +269,6 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
 
         job.budget = amount;
         emit BudgetSet(jobId, amount);
-        jobHasBudget[jobId] = true;
 
         _afterHook(job.hook, jobId, msg.sig, data);
     }
