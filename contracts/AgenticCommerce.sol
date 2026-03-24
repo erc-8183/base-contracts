@@ -58,7 +58,6 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
     mapping(uint256 => Job) public jobs;
     uint256 public jobCounter;
     mapping(address => bool) public whitelistedHooks;
-    mapping(uint256 jobId => bool hasBudget) public jobHasBudget;
 
     event JobCreated(
         uint256 indexed jobId,
@@ -96,6 +95,11 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         address indexed provider,
         uint256 amount
     );
+    event PlatformFeePaid(
+        uint256 indexed jobId,
+        address indexed platformTreasury,
+        uint256 amount
+    );
     event EvaluatorFeePaid(
         uint256 indexed jobId,
         address indexed evaluator,
@@ -107,8 +111,11 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         uint256 amount
     );
     event HookWhitelistUpdated(address indexed hook, bool status);
+    event PlatformFeeSet(uint256 feeBP, address indexed treasury);
+    event EvaluatorFeeSet(uint256 feeBP);
 
     error InvalidJob();
+    error InvalidHook();
     error WrongStatus();
     error Unauthorized();
     error ZeroAddress();
@@ -149,11 +156,13 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         if (feeBP_ + evaluatorFeeBP > 10000) revert FeesTooHigh();
         platformFeeBP = feeBP_;
         platformTreasury = treasury_;
+        emit PlatformFeeSet(feeBP_, treasury_);
     }
 
     function setEvaluatorFee(uint256 feeBP_) external onlyRole(ADMIN_ROLE) {
         if (feeBP_ + platformFeeBP > 10000) revert FeesTooHigh();
         evaluatorFeeBP = feeBP_;
+        emit EvaluatorFeeSet(feeBP_);
     }
 
     /// @notice Whitelist or remove a hook contract
@@ -211,7 +220,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
                     hook,
                     type(IACPHook).interfaceId
                 )
-            ) revert InvalidJob();
+            ) revert InvalidHook();
         }
 
         uint256 jobId = ++jobCounter;
@@ -250,7 +259,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
 
     function setProvider(uint256 jobId, address provider_, uint256 agentId) external {
         Job storage job = jobs[jobId];
-        if (job.id == 0) revert InvalidJob();
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
         if (msg.sender != job.client) revert Unauthorized();
         if (job.provider != address(0)) revert WrongStatus();
@@ -267,7 +276,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         bytes calldata optParams
     ) external nonReentrant {
         Job storage job = jobs[jobId];
-        if (job.id == 0) revert InvalidJob();
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
         if (msg.sender != job.client && msg.sender != job.provider) revert Unauthorized();
         if (token == address(0)) revert ZeroAddress();
@@ -278,7 +287,6 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         job.paymentToken = token;
         job.budget = amount;
         emit BudgetSet(jobId, token, amount);
-        jobHasBudget[jobId] = true;
 
         _afterHook(job.hook, jobId, msg.sig, data);
     }
@@ -289,7 +297,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         bytes calldata optParams
     ) external nonReentrant {
         Job storage job = jobs[jobId];
-        if (job.id == 0) revert InvalidJob();
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
         if (msg.sender != job.client) revert Unauthorized();
         if (job.provider == address(0)) revert ProviderNotSet();
@@ -318,7 +326,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         bytes calldata optParams
     ) external nonReentrant {
         Job storage job = jobs[jobId];
-        if (job.id == 0) revert InvalidJob();
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (
             job.status != JobStatus.Funded &&
             (job.status != JobStatus.Open || job.budget > 0) // Allow Open job with 0 budget to be submitted
@@ -340,7 +348,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         bytes calldata optParams
     ) external nonReentrant {
         Job storage job = jobs[jobId];
-        if (job.id == 0) revert InvalidJob();
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Submitted) revert WrongStatus();
         if (msg.sender != job.evaluator) revert Unauthorized();
 
@@ -357,6 +365,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         IERC20 token = IERC20(job.paymentToken);
         if (platformFee > 0) {
             token.safeTransfer(platformTreasury, platformFee);
+            emit PlatformFeePaid(jobId, platformTreasury, platformFee);
         }
         if (evalFee > 0) {
             token.safeTransfer(job.evaluator, evalFee);
@@ -378,7 +387,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         bytes calldata optParams
     ) external nonReentrant {
         Job storage job = jobs[jobId];
-        if (job.id == 0) revert InvalidJob();
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
 
         if (job.status == JobStatus.Open) {
             if (msg.sender != job.client) revert Unauthorized();
@@ -411,7 +420,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
 
     function claimRefund(uint256 jobId) external nonReentrant {
         Job storage job = jobs[jobId];
-        if (job.id == 0) revert InvalidJob();
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Funded && job.status != JobStatus.Submitted)
             revert WrongStatus();
         if (block.timestamp < job.expiredAt) revert WrongStatus();
