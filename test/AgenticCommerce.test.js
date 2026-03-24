@@ -222,4 +222,75 @@ describe("Image Generation", function () {
     expect(await usdc.balanceOf(provider.address)).to.equal(TWENTY_USDC);
     expect(await usdc.balanceOf(coreAddr)).to.equal(0n);
   });
+
+  it("claimRefund: reverts during grace period when job is Submitted", async function () {
+    const { usdc, core, client, provider, evaluator } =
+      await loadFixture(deployFixture);
+
+    const coreAddr = await core.getAddress();
+    const usdcAddr = await usdc.getAddress();
+    const expiry = (await time.latest()) + 3600;
+
+    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "grace period test", ethers.ZeroAddress, 0);
+    const jobId = 1n;
+
+    await core.connect(provider).setBudget(jobId, usdcAddr, TWENTY_USDC, "0x");
+    await core.connect(client).fund(jobId, TWENTY_USDC, "0x");
+
+    // Provider submits right before expiry
+    await time.increaseTo(expiry - 60);
+    await core.connect(provider).submit(jobId, ethers.encodeBytes32String("work"), "0x");
+
+    // Move past expiry but within grace period
+    await time.increaseTo(expiry + 1);
+    await expect(
+      core.claimRefund(jobId)
+    ).to.be.revertedWithCustomError(core, "GracePeriodActive");
+
+    // Evaluator can still complete during grace period
+    await core.connect(evaluator).complete(jobId, ethers.encodeBytes32String("ok"), "0x");
+    expect((await core.getJob(jobId)).status).to.equal(3n); // Completed
+    expect(await usdc.balanceOf(provider.address)).to.equal(TWENTY_USDC);
+  });
+
+  it("claimRefund: succeeds after grace period expires on Submitted job", async function () {
+    const { usdc, core, client, provider, evaluator } =
+      await loadFixture(deployFixture);
+
+    const usdcAddr = await usdc.getAddress();
+    const expiry = (await time.latest()) + 3600;
+
+    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "grace expiry test", ethers.ZeroAddress, 0);
+    const jobId = 1n;
+
+    await core.connect(provider).setBudget(jobId, usdcAddr, TWENTY_USDC, "0x");
+    await core.connect(client).fund(jobId, TWENTY_USDC, "0x");
+    await core.connect(provider).submit(jobId, ethers.encodeBytes32String("work"), "0x");
+
+    // Move past expiry + grace period (1 hour)
+    await time.increaseTo(expiry + 3601);
+    await core.claimRefund(jobId);
+    expect((await core.getJob(jobId)).status).to.equal(5n); // Expired
+    expect(await usdc.balanceOf(client.address)).to.equal(TWENTY_USDC);
+  });
+
+  it("claimRefund: no grace period for Funded (not Submitted) jobs", async function () {
+    const { usdc, core, client, provider, evaluator } =
+      await loadFixture(deployFixture);
+
+    const usdcAddr = await usdc.getAddress();
+    const expiry = (await time.latest()) + 3600;
+
+    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "no grace test", ethers.ZeroAddress, 0);
+    const jobId = 1n;
+
+    await core.connect(provider).setBudget(jobId, usdcAddr, TWENTY_USDC, "0x");
+    await core.connect(client).fund(jobId, TWENTY_USDC, "0x");
+    // NOT submitted - stays Funded
+
+    await time.increaseTo(expiry + 1);
+    await core.claimRefund(jobId);
+    expect((await core.getJob(jobId)).status).to.equal(5n); // Expired
+    expect(await usdc.balanceOf(client.address)).to.equal(TWENTY_USDC);
+  });
 });
