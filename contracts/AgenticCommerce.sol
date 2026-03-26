@@ -224,6 +224,14 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         }
 
         uint256 jobId = ++jobCounter;
+
+        _beforeHook(
+            hook,
+            jobId,
+            msg.sig,
+            abi.encode(msg.sender, provider, evaluator)
+        );
+
         jobs[jobId] = Job({
             id: jobId,
             client: msg.sender,
@@ -425,6 +433,9 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
             revert WrongStatus();
         if (block.timestamp < job.expiredAt) revert WrongStatus();
 
+        bytes memory data = abi.encode(msg.sender);
+        _beforeHook(job.hook, jobId, msg.sig, data);
+
         job.status = JobStatus.Expired;
 
         if (job.budget > 0) {
@@ -433,6 +444,8 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         }
 
         emit JobExpired(jobId);
+
+        _afterHook(job.hook, jobId, msg.sig, data);
     }
 
     // ──────────────────── View ────────────────────
