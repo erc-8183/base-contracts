@@ -421,7 +421,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
     function claimRefund(uint256 jobId) external nonReentrant {
         Job storage job = jobs[jobId];
         if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
-        if (job.status != JobStatus.Funded && job.status != JobStatus.Submitted)
+        if (job.status != JobStatus.Open && job.status != JobStatus.Funded && job.status != JobStatus.Submitted)
             revert WrongStatus();
         if (block.timestamp < job.expiredAt) revert WrongStatus();
 
