@@ -125,6 +125,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
     error FeesTooHigh();
     error HookNotWhitelisted();
     error BudgetMismatch();
+    error ProviderCannotBeEvaluator();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -212,6 +213,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         uint256 providerAgentId
     ) external nonReentrant returns (uint256) {
         if (evaluator == address(0)) revert ZeroAddress();
+        if (provider != address(0) && provider == evaluator) revert ProviderCannotBeEvaluator();
         if (expiredAt <= block.timestamp + 5 minutes) revert ExpiryTooShort();
         if (!whitelistedHooks[hook]) revert HookNotWhitelisted();
         if (hook != address(0)) {
@@ -264,6 +266,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         if (msg.sender != job.client) revert Unauthorized();
         if (job.provider != address(0)) revert WrongStatus();
         if (provider_ == address(0)) revert ZeroAddress();
+        if (provider_ == job.evaluator) revert ProviderCannotBeEvaluator();
         job.provider = provider_;
         job.providerAgentId = agentId;
         emit ProviderSet(jobId, provider_, agentId);
