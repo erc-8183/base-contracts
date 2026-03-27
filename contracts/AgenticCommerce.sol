@@ -49,7 +49,10 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         address hook;
         address paymentToken;
         uint256 providerAgentId; // Optional ERC-8004 agent identity
+        uint256 submittedAt; // Timestamp when provider submitted work
     }
+
+    uint256 public constant EVALUATION_GRACE_PERIOD = 1 hours;
 
     uint256 public platformFeeBP; // 10000 = 100%
     address public platformTreasury;
@@ -125,6 +128,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
     error FeesTooHigh();
     error HookNotWhitelisted();
     error BudgetMismatch();
+    error GracePeriodActive();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -235,7 +239,8 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
             status: JobStatus.Open,
             hook: hook,
             paymentToken: address(0),
-            providerAgentId: provider != address(0) ? providerAgentId : 0
+            providerAgentId: provider != address(0) ? providerAgentId : 0,
+            submittedAt: 0
         });
 
         emit JobCreated(
@@ -337,6 +342,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         _beforeHook(job.hook, jobId, msg.sig, data);
 
         job.status = JobStatus.Submitted;
+        job.submittedAt = block.timestamp;
         emit JobSubmitted(jobId, job.provider, deliverable);
 
         _afterHook(job.hook, jobId, msg.sig, data);
@@ -424,6 +430,10 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         if (job.status != JobStatus.Open && job.status != JobStatus.Funded && job.status != JobStatus.Submitted)
             revert WrongStatus();
         if (block.timestamp < job.expiredAt) revert WrongStatus();
+        // Grace period: if provider already submitted, give evaluator extra time
+        if (job.status == JobStatus.Submitted &&
+            block.timestamp < job.submittedAt + EVALUATION_GRACE_PERIOD)
+            revert GracePeriodActive();
 
         job.status = JobStatus.Expired;
 
