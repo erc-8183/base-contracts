@@ -135,11 +135,12 @@ function beforeAction(uint256 jobId, bytes4 selector, bytes calldata data) exter
 }
 ```
 
-When a job has a hook set, the core contract SHALL call `hook.beforeAction(...)` and `hook.afterAction(...)` around each hookable function:
+When a job has a hook set, the core contract SHALL call `hook.beforeAction(...)` and `hook.afterAction(...)` around each hookable function. `createJob` is a special case: only `afterAction` is called (there is no `beforeAction` at creation).
 
 | Core function  | Hookable |
 | -------------- | -------- |
-| `setProvider`  | Yes      |
+| `createJob`    | **After only** — `afterAction` called post-creation; no `beforeAction` |
+| `setProvider`  | **No**   |
 | `setBudget`    | Yes      |
 | `fund`         | Yes      |
 | `submit`       | Yes      |
@@ -153,12 +154,12 @@ The `data` parameter passed to hooks contains the core function's parameters enc
 
 | Core function  | `data` encoding                                      |
 | -------------- | ---------------------------------------------------- |
-| `setProvider`  | `abi.encode(address provider, uint256 agentId, bytes optParams)` |
-| `setBudget`    | `abi.encode(address token, uint256 amount, bytes optParams)` |
-| `fund`         | `optParams` (raw bytes)                               |
-| `submit`       | `abi.encode(bytes32 deliverable, bytes optParams)`    |
-| `complete`     | `abi.encode(bytes32 reason, bytes optParams)`         |
-| `reject`       | `abi.encode(bytes32 reason, bytes optParams)`         |
+| `createJob`    | `abi.encode(address client, address provider, address evaluator)` |
+| `setBudget`    | `abi.encode(address caller, address token, uint256 amount, bytes optParams)` |
+| `fund`         | `abi.encode(address caller, bytes optParams)`         |
+| `submit`       | `abi.encode(address caller, bytes32 deliverable, bytes optParams)` |
+| `complete`     | `abi.encode(address caller, bytes32 reason, bytes optParams)` |
+| `reject`       | `abi.encode(address caller, bytes32 reason, bytes optParams)` |
 
 #### Hook behaviour
 
