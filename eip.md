@@ -42,6 +42,7 @@ Allowed transitions:
 
 - **Open → Funded**: Client or provider calls `setBudget(jobId, token, amount)` to agree on price and payment token, then client calls `fund(jobId, expectedBudget)`; contract pulls `job.budget` of the job's payment token from client into escrow.
 - **Open → Rejected**: Client calls `reject(jobId, reason?)`.
+- **Open → Expired**: When `block.timestamp >= job.expiredAt`, anyone (or client) may call `claimRefund(jobId)`; contract sets state to Expired. No refund to client as job has not been funded yet.
 - **Funded → Submitted**: Provider calls `submit(jobId, deliverable)`; signals that work has been completed and is ready for evaluation.
 - **Funded → Rejected**: Evaluator calls `reject(jobId, reason?)`; contract refunds client.
 - **Funded → Expired**: When `block.timestamp >= job.expiredAt`, anyone (or client) may call `claimRefund(jobId)`; contract sets state to Expired and refunds client.
@@ -84,21 +85,21 @@ SHALL revert if `job.provider == address(0)` (provider MUST be set before fundin
 ### Core Functions
 
 - **createJob(provider, evaluator, expiredAt, description, hook?, providerAgentId?)**
-Called by client. Creates job in Open with `client = msg.sender`, `provider`, `evaluator`, `expiredAt`, `description`, and optional `hook` address. SHALL revert if `evaluator` is zero or `expiredAt` is not in the future. **Provider MAY be zero**; if so, client MUST call `setProvider` before `fund`. `hook` MAY be `address(0)` (no hook). `providerAgentId` is the provider's [ERC-8004](./eip-8004.md) agent identity; if `provider` is non-zero and `providerAgentId` is non-zero, SHALL set `job.providerAgentId = providerAgentId`; the contract MAY verify that `provider` is the owner or operator of that `providerAgentId` on the ERC-8004 registry. Returns `jobId`.
-- **setProvider(jobId, provider, agentId?, optParams?)**
-Called by client. SHALL revert if job is not Open, current `job.provider != address(0)`, or `provider == address(0)`. SHALL set `job.provider = provider`. `agentId` is the provider's [ERC-8004](./eip-8004.md) agent identity; if non-zero, SHALL set `job.providerAgentId = agentId`; the contract MAY verify that `provider` is the owner or operator of that agentId on the ERC-8004 registry. `optParams` (bytes, OPTIONAL) is forwarded to the hook contract if set (see Hooks).
+Called by client. Creates job in Open with `client = msg.sender`, `provider`, `evaluator`, `expiredAt`, `description`, and optional `hook` address. SHALL revert if `evaluator` is zero or `expiredAt` is not at least 5 minutes in the future. **Provider MAY be zero**; if so, client MUST call `setProvider` before `fund`. `hook` MAY be `address(0)` (no hook). `providerAgentId` is the provider's [ERC-8004](./eip-8004.md) agent identity; if `provider` is non-zero and `providerAgentId` is non-zero, SHALL set `job.providerAgentId = providerAgentId`; the contract MAY verify that `provider` is the owner or operator of that `providerAgentId` on the ERC-8004 registry. Returns `jobId`.
+- **setProvider(jobId, provider, agentId?)**
+Called by client. SHALL revert if job is not Open, current `job.provider != address(0)`, or `provider == address(0)`. SHALL set `job.provider = provider`. `agentId` is the provider's [ERC-8004](./eip-8004.md) agent identity; if non-zero, SHALL set `job.providerAgentId = agentId`; the contract MAY verify that `provider` is the owner or operator of that agentId on the ERC-8004 registry.
 - **setBudget(jobId, token, amount, optParams?)**
 Called by client or provider. Sets `job.paymentToken = token` and `job.budget = amount`. SHALL revert if job is not Open, caller is not client or provider, or `token` is the zero address. `optParams` forwarded to hook if set.
 - **fund(jobId, expectedBudget, optParams?)**
-Called by client. SHALL revert if job is not Open, caller is not client, budget is zero, **provider is not set** (`job.provider == address(0)`), or `job.budget != expectedBudget` (front-running protection). SHALL transfer `job.budget` of the job's payment token (`job.paymentToken`) from client to the contract (escrow) and set status to Funded. `optParams` forwarded to hook if set.
+Called by client. SHALL revert if job is not Open, caller is not client, **provider is not set** (`job.provider == address(0)`), `job.budget != expectedBudget` (front-running protection), or job has expired (`block.timestamp >= expiredAt`). SHALL transfer `job.budget` of the job's payment token (`job.paymentToken`) from client to the contract (escrow) and set status to Funded. `optParams` forwarded to hook if set.
 - **submit(jobId, deliverable, optParams?)**
-Called by provider only. SHALL revert if job is not Funded or caller is not the job's provider. SHALL set status to Submitted. `deliverable` (`bytes32`) is a reference to submitted work (e.g. hash of off-chain deliverable, IPFS CID, attestation commitment). SHALL emit an event including `deliverable` (e.g. JobSubmitted). `optParams` forwarded to hook if set.
+Called by provider only. SHALL revert if caller is not the job's provider. SHALL revert if job is not Funded, unless the job is Open with `budget == 0` (zero-budget job, no escrow needed). SHALL set status to Submitted. `deliverable` (`bytes32`) is a reference to submitted work (e.g. hash of off-chain deliverable, IPFS CID, attestation commitment). SHALL emit an event including `deliverable` (e.g. JobSubmitted). `optParams` forwarded to hook if set.
 - **complete(jobId, reason, optParams?)**
-Called by evaluator only. SHALL revert if job is not Submitted or caller is not the job's evaluator. SHALL set status to Completed. SHALL transfer escrowed funds to provider (minus optional platform fee to a configurable treasury). `reason` MAY be `bytes32(0)` or an attestation hash (OPTIONAL). SHALL emit an event including `reason` if provided. `optParams` forwarded to hook if set.
+Called by evaluator only. SHALL revert if job is not Submitted or caller is not the job's evaluator. SHALL set status to Completed. SHALL transfer escrowed funds to provider (minus optional platform fee to a configurable treasury and optional evaluator fee to the evaluator address). `reason` MAY be `bytes32(0)` or an attestation hash (OPTIONAL). SHALL emit an event including `reason` if provided. `optParams` forwarded to hook if set.
 - **reject(jobId, reason, optParams?)**
 Called by **client when job is Open** or by **evaluator when job is Funded or Submitted**. SHALL revert if job is not Open, Funded, or Submitted, or caller is not the client (when Open) or the evaluator (when Funded or Submitted). SHALL set status to Rejected. If Funded or Submitted, SHALL refund escrow to client. `reason` OPTIONAL. SHALL emit an event including `reason` and the caller (rejector) if provided. `optParams` forwarded to hook if set.
 - **claimRefund(jobId)**
-Callable when job is Funded or Submitted and the job has expired (`block.timestamp >= expiredAt`). SHALL revert if job is not Funded or Submitted, or if the job has not yet expired. SHALL transfer full escrow to client and set status to Expired. MAY restrict caller (e.g. client only) or allow anyone; the specification RECOMMENDS allowing anyone to trigger refund after expiry.
+Callable by anyone when the job has expired (`block.timestamp >= expiredAt`) and status is Open, Funded, or Submitted. SHALL revert if job is not in one of those statuses or has not yet expired. SHALL set status to Expired. If the job has a funded escrow (`budget > 0`), SHALL transfer the full escrow to the client.
 
 ### Attestation
 
@@ -107,7 +108,7 @@ Callable when job is Funded or Submitted and the job has expired (`block.timesta
 
 ### Fees
 
-Implementations MAY charge a **platform fee** (basis points) on Completed, paid to a configurable treasury. The specification does not require a fee. If present, fee SHALL be deducted only on completion (not on refund).
+Implementations MAY charge a **platform fee** and/or an **evaluator fee** (both in basis points) on Completed. The platform fee is paid to a configurable treasury; the evaluator fee is paid to the job's evaluator address. The specification does not require either fee. If present, fees SHALL be deducted only on completion (not on refund).
 
 ### Hooks (OPTIONAL)
 
@@ -134,11 +135,12 @@ function beforeAction(uint256 jobId, bytes4 selector, bytes calldata data) exter
 }
 ```
 
-When a job has a hook set, the core contract SHALL call `hook.beforeAction(...)` and `hook.afterAction(...)` around each hookable function:
+When a job has a hook set, the core contract SHALL call `hook.beforeAction(...)` and `hook.afterAction(...)` around each hookable function. `createJob` is a special case: only `afterAction` is called (there is no `beforeAction` at creation).
 
 | Core function  | Hookable |
 | -------------- | -------- |
-| `setProvider`  | Yes      |
+| `createJob`    | **After only** — `afterAction` called post-creation; no `beforeAction` |
+| `setProvider`  | **No**   |
 | `setBudget`    | Yes      |
 | `fund`         | Yes      |
 | `submit`       | Yes      |
@@ -152,12 +154,12 @@ The `data` parameter passed to hooks contains the core function's parameters enc
 
 | Core function  | `data` encoding                                      |
 | -------------- | ---------------------------------------------------- |
-| `setProvider`  | `abi.encode(address provider, uint256 agentId, bytes optParams)` |
-| `setBudget`    | `abi.encode(address token, uint256 amount, bytes optParams)` |
-| `fund`         | `optParams` (raw bytes)                               |
-| `submit`       | `abi.encode(bytes32 deliverable, bytes optParams)`    |
-| `complete`     | `abi.encode(bytes32 reason, bytes optParams)`         |
-| `reject`       | `abi.encode(bytes32 reason, bytes optParams)`         |
+| `createJob`    | `abi.encode(address client, address provider, address evaluator)` |
+| `setBudget`    | `abi.encode(address caller, address token, uint256 amount, bytes optParams)` |
+| `fund`         | `abi.encode(address caller, bytes optParams)`         |
+| `submit`       | `abi.encode(address caller, bytes32 deliverable, bytes optParams)` |
+| `complete`     | `abi.encode(address caller, bytes32 reason, bytes optParams)` |
+| `reject`       | `abi.encode(address caller, bytes32 reason, bytes optParams)` |
 
 #### Hook behaviour
 
