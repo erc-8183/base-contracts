@@ -95,7 +95,7 @@ Called by client. SHALL revert if job is not Open, caller is not client, **provi
 - **submit(jobId, deliverable, optParams?)**
 Called by provider only. SHALL revert if caller is not the job's provider. SHALL revert if job is not Funded, unless the job is Open with `budget == 0` (zero-budget job, no escrow needed). SHALL set status to Submitted. `deliverable` (`bytes32`) is a reference to submitted work (e.g. hash of off-chain deliverable, IPFS CID, attestation commitment). SHALL emit an event including `deliverable` (e.g. JobSubmitted). `optParams` forwarded to hook if set.
 - **complete(jobId, reason, optParams?)**
-Called by evaluator only. SHALL revert if job is not Submitted or caller is not the job's evaluator. SHALL set status to Completed. SHALL transfer escrowed funds to provider (minus optional platform fee to a configurable treasury). `reason` MAY be `bytes32(0)` or an attestation hash (OPTIONAL). SHALL emit an event including `reason` if provided. `optParams` forwarded to hook if set.
+Called by evaluator only. SHALL revert if job is not Submitted or caller is not the job's evaluator. SHALL set status to Completed. SHALL transfer escrowed funds to provider (minus optional platform fee to a configurable treasury and optional evaluator fee to the evaluator address). `reason` MAY be `bytes32(0)` or an attestation hash (OPTIONAL). SHALL emit an event including `reason` if provided. `optParams` forwarded to hook if set.
 - **reject(jobId, reason, optParams?)**
 Called by **client when job is Open** or by **evaluator when job is Funded or Submitted**. SHALL revert if job is not Open, Funded, or Submitted, or caller is not the client (when Open) or the evaluator (when Funded or Submitted). SHALL set status to Rejected. If Funded or Submitted, SHALL refund escrow to client. `reason` OPTIONAL. SHALL emit an event including `reason` and the caller (rejector) if provided. `optParams` forwarded to hook if set.
 - **claimRefund(jobId)**
@@ -108,7 +108,7 @@ Callable by anyone when the job has expired (`block.timestamp >= expiredAt`) and
 
 ### Fees
 
-Implementations MAY charge a **platform fee** (basis points) on Completed, paid to a configurable treasury. The specification does not require a fee. If present, fee SHALL be deducted only on completion (not on refund).
+Implementations MAY charge a **platform fee** and/or an **evaluator fee** (both in basis points) on Completed. The platform fee is paid to a configurable treasury; the evaluator fee is paid to the job's evaluator address. The specification does not require either fee. If present, fees SHALL be deducted only on completion (not on refund).
 
 ### Hooks (OPTIONAL)
 
