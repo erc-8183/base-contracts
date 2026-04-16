@@ -217,7 +217,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         uint256 providerAgentId
     ) external nonReentrant returns (uint256) {
         if (evaluator == address(0)) revert ZeroAddress();
-        if (provider != address(0) && provider == evaluator) revert ProviderCannotBeEvaluator();
+        if (evaluator != address(0) && evaluator == provider) revert ProviderCannotBeEvaluator();
         if (expiredAt <= block.timestamp + 5 minutes) revert ExpiryTooShort();
         if (!whitelistedHooks[hook]) revert HookNotWhitelisted();
         if (hook != address(0)) {
