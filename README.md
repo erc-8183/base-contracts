@@ -28,7 +28,7 @@ Each transition enforces role-based access control, and funds are held in escrow
 
 ## Hook System
 
-Jobs can optionally attach a **hook contract** (`IACPHook`) to extend behavior without modifying the core:
+Jobs can optionally attach a **hook contract** (`IERC8183Hook`) to extend behavior without modifying the core:
 
 - `beforeAction` — called before state changes, can revert to gate transitions
 - `afterAction` — called after state changes, for bookkeeping and side effects
@@ -40,7 +40,7 @@ When `hook == address(0)`, the contract operates as a standalone job escrow with
 ```
 contracts/
 ├── AgenticCommerce.sol    # Core state machine, escrow, fees, hooks
-├── IACPHook.sol           # Hook interface (beforeAction/afterAction)
+├── IERC8183Hook.sol       # Hook interface (beforeAction/afterAction)
 └── mocks/
     ├── MockUSDC.sol        # Test ERC20, 6 decimals
     └── MockCBBTC.sol       # Test ERC20, 8 decimals
@@ -59,7 +59,7 @@ See [docs/01-architecture.md](docs/01-architecture.md) for state machine and seq
 ## Documentation
 
 - [Architecture & Diagrams](docs/01-architecture.md) — state machine, sequence flows
-- [Hook System Design](docs/02-hook-system.md) — IACPHook interface, safety model, invocation pattern
+- [Hook System Design](docs/02-hook-system.md) — IERC8183Hook interface, safety model, invocation pattern
 - [Demo Flows](docs/03-demo-flows.md) — end-to-end example scenarios
 
 ## Contributing

@@ -1,4 +1,4 @@
-# ACP Flow Diagrams
+# ERC-8183 Flow Diagrams
 
 ## State Machine
 
@@ -53,7 +53,7 @@ sequenceDiagram
 sequenceDiagram
     participant C as Client
     participant AC as AgenticCommerce
-    participant H as Hook (IACPHook)
+    participant H as Hook (IERC8183Hook)
     participant P as Provider
     participant E as Evaluator
 

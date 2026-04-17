@@ -6,10 +6,10 @@ The hook system allows external contracts to intercept and extend ERC-8183 state
 
 The interface is intentionally minimal (two functions) so it remains stable as the protocol evolves — new hookable functions simply produce new selector values without changing the interface.
 
-## IACPHook Interface
+## IERC8183Hook Interface
 
 ```solidity
-interface IACPHook {
+interface IERC8183Hook {
     /// @dev Called before the core function executes. MAY revert to block the action.
     function beforeAction(uint256 jobId, bytes4 selector, bytes calldata data) external;
 
@@ -62,13 +62,13 @@ The core uses two internal helpers:
 ```solidity
 function _beforeHook(address hook, uint256 jobId, bytes4 selector, bytes memory data) internal {
     if (hook != address(0)) {
-        IACPHook(hook).beforeAction(jobId, selector, data);
+        IERC8183Hook(hook).beforeAction(jobId, selector, data);
     }
 }
 
 function _afterHook(address hook, uint256 jobId, bytes4 selector, bytes memory data) internal {
     if (hook != address(0)) {
-        IACPHook(hook).afterAction(jobId, selector, data);
+        IERC8183Hook(hook).afterAction(jobId, selector, data);
     }
 }
 ```
