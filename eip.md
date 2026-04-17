@@ -114,10 +114,10 @@ Implementations MAY charge a **platform fee** and/or an **evaluator fee** (both 
 
 Implementations MAY support an optional **hook contract** per job to extend the core protocol without modifying it. The hook address is set at job creation (or `address(0)` for no hook) and stored on the job. A **non‑hooked kernel** that ignores the `hook` field (or always sets it to `address(0)`) is fully compliant with this specification; the reference `AgenticCommerce` contract follows this minimal pattern, while `AgenticCommerceHooked` is an **extension** that layers the hook callbacks on top of the same lifecycle.
 
-A hook contract SHALL implement the `IACPHook` interface — just two functions:
+A hook contract SHALL implement the `IERC8183Hook` interface — just two functions:
 
 ```solidity
-interface IACPHook {
+interface IERC8183Hook {
     function beforeAction(uint256 jobId, bytes4 selector, bytes calldata data) external;
     function afterAction(uint256 jobId, bytes4 selector, bytes calldata data) external;
 }
@@ -173,13 +173,13 @@ The `data` parameter passed to hooks contains the core function's parameters enc
 - Hooks are **trusted** contracts chosen by the client at job creation. A malicious or buggy hook can revert valid actions or execute arbitrary logic in callbacks. Clients SHOULD audit or use well-known hook implementations.
 - **Liveness:** A reverting hook can block all hookable actions for that job until `expiredAt`. This is by design — the hook is part of the job's policy. The guaranteed recovery path is `claimRefund` after expiry, which is deliberately **not hookable** so that refunds cannot be blocked.
 - **Atomicity:** After-callbacks run after state changes but within the same transaction. If an after-callback reverts, the entire transaction (including the core state change) is rolled back. This is intentional — it enables atomic multi-step flows (e.g. escrow funding + side token transfer must both succeed or both revert).
-- `onlyACP` modifiers on hooks are RECOMMENDED so that hook functions cannot be called directly by external actors.
+- `onlyERC8183` modifiers on hooks are RECOMMENDED so that hook functions cannot be called directly by external actors.
 - Hooks SHOULD NOT be upgradeable after a job is created, as this would allow the hook to change behaviour mid-job.
 - Implementations MAY maintain an allowlist or registry of audited hook contracts to reduce risk for clients.
 
 #### Convenience base contract (non-normative)
 
-Implementations MAY provide a `BaseACPHook` that routes the generic `beforeAction`/`afterAction` calls to named virtual functions (e.g. `_preFund`, `_postComplete`) so hook developers only override what they need. This is NOT part of the standard — only `IACPHook` is normative.
+Implementations MAY provide a `BaseERC8183Hook` that routes the generic `beforeAction`/`afterAction` calls to named virtual functions (e.g. `_preFund`, `_postComplete`) so hook developers only override what they need. This is NOT part of the standard — only `IERC8183Hook` is normative.
 
 #### Example use cases
 
@@ -301,7 +301,7 @@ Implementations SHOULD emit at least:
 - **Four states**: Open, Funded, Submitted, and Terminal (Completed, Rejected, or Expired) are enough for "fund → work → submit → evaluate or refund".
 - **Expiry**: Refund after `expiredAt` gives client a way to reclaim funds without an explicit reject.
 - **Hooks over inheritance**: Optional hook contracts let integrators extend the protocol (validation, reputation, fees) without modifying or inheriting from the core contract. The core stays minimal; complexity lives in the hook.
-- **Generic hook interface**: The `IACPHook` interface uses just two functions (`beforeAction`/`afterAction`) with a selector parameter rather than named functions per action. This keeps the interface stable as the core protocol evolves — new hookable functions simply produce new selector values without changing the interface.
+- **Generic hook interface**: The `IERC8183Hook` interface uses just two functions (`beforeAction`/`afterAction`) with a selector parameter rather than named functions per action. This keeps the interface stable as the core protocol evolves — new hookable functions simply produce new selector values without changing the interface.
 
 ### Extensions (OPTIONAL)
 
@@ -324,7 +324,7 @@ The following patterns are RECOMMENDED:
   - On `complete(jobId, reason, optParams?)` and `reject(jobId, reason, optParams?)`, the evaluator (which MAY be a contract) SHOULD:
     - produce an attestation or structured log that can be added to the ERC‑8004 **reputation registry** as feedback (e.g. "provider successfully completed job", "job rejected for reason X"). Attestations MAY reference the job, parties, and `reason` (e.g. a hash of off‑chain evidence).
     - and/or post a proof to the ERC‑8004 **validation registry**, which a hook (or evaluator contract) then reads in order to decide whether to mark the job as `Completed` or `Rejected`.
-  - Hooks MAY be used to call into ERC‑8004 registries in `afterAction` for `complete`/`reject`, keeping the core ACP contract unaware of the registry details.
+  - Hooks MAY be used to call into ERC‑8004 registries in `afterAction` for `complete`/`reject`, keeping the core ERC-8183 contract unaware of the registry details.
 
 - **Reputation‑aware policy via hooks**
   - Hooks MAY consult ERC‑8004 data before allowing certain actions, for example:
@@ -338,7 +338,7 @@ The following patterns are RECOMMENDED:
   - Reputation writes (e.g. on `complete` or `reject`) can reference the stored `providerAgentId` to attribute outcomes to the correct agent identity in the ERC‑8004 registry.
 
 - **Separation of concerns**
-  - ACP remains the **payment and escrow** layer; ERC‑8004 is the **identity and reputation** layer.
+  - ERC-8183 remains the **payment and escrow** layer; ERC‑8004 is the **identity and reputation** layer.
   - Interop is achieved by:
     - storing the provider's `agentId` on the job for direct identity lookup,
     - emitting events that ERC‑8004 indexers can consume, and/or
@@ -354,12 +354,12 @@ To support gasless execution — where a client, provider, or evaluator signs an
 
 1. A participant (client, provider, or evaluator) signs a meta-transaction off-chain (e.g. `createJob`, `fund`, `submit`).
 2. A facilitator submits the signed payload to a **trusted forwarder** contract.
-3. The forwarder verifies the signature and calls the ACP contract, appending the original signer's address.
-4. The ACP contract uses `_msgSender()` (from `ERC2771Context`) instead of `msg.sender` to identify the caller.
+3. The forwarder verifies the signature and calls the ERC-8183 contract, appending the original signer's address.
+4. The ERC-8183 contract uses `_msgSender()` (from `ERC2771Context`) instead of `msg.sender` to identify the caller.
 
 **Implementation requirements:**
 
-- The ACP contract SHALL inherit `ERC2771Context` (or equivalent) and use `_msgSender()` for all authorization checks (`client`, `provider`, `evaluator`).
+- The ERC-8183 contract SHALL inherit `ERC2771Context` (or equivalent) and use `_msgSender()` for all authorization checks (`client`, `provider`, `evaluator`).
 - All role checks (e.g. "caller is client", "caller is provider") SHALL use `_msgSender()` rather than `msg.sender`.
 - The trusted forwarder address SHALL be set at deployment and SHOULD be immutable.
 
@@ -392,16 +392,16 @@ No backward compatibility issues found.
 
 ## Reference Implementation
 
-The reference implementation consists of two contracts: `IACPHook`, the optional and minimal hook interface that developers implement, and `AgenticCommerce`, the core Job primitive with escrow and optional hook extension points.
+The reference implementation consists of two contracts: `IERC8183Hook`, the optional and minimal hook interface that developers implement, and `AgenticCommerce`, the core Job primitive with escrow and optional hook extension points.
 
-### IACPHook.sol
+### IERC8183Hook.sol
 
 ```solidity
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 
-interface IACPHook is IERC165 {
+interface IERC8183Hook is IERC165 {
     function beforeAction(uint256 jobId, bytes4 selector, bytes calldata data) external;
     function afterAction(uint256 jobId, bytes4 selector, bytes calldata data) external;
 }
@@ -418,7 +418,7 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
-import "./IACPHook.sol";
+import "./IERC8183Hook.sol";
 import "@openzeppelin/contracts/utils/introspection/ERC165Checker.sol";
 
 contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyGuardTransient, UUPSUpgradeable {
@@ -528,13 +528,13 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
 
     function _beforeHook(address hook, uint256 jobId, bytes4 selector, bytes memory data) internal {
         if (hook != address(0)) {
-            IACPHook(hook).beforeAction(jobId, selector, data);
+            IERC8183Hook(hook).beforeAction(jobId, selector, data);
         }
     }
 
     function _afterHook(address hook, uint256 jobId, bytes4 selector, bytes memory data) internal {
         if (hook != address(0)) {
-            IACPHook(hook).afterAction(jobId, selector, data);
+            IERC8183Hook(hook).afterAction(jobId, selector, data);
         }
     }
 
@@ -548,7 +548,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         if (expiredAt <= block.timestamp + 5 minutes) revert ExpiryTooShort();
         if (!whitelistedHooks[hook]) revert HookNotWhitelisted();
         if (hook != address(0)) {
-            if (!ERC165Checker.supportsInterface(hook, type(IACPHook).interfaceId))
+            if (!ERC165Checker.supportsInterface(hook, type(IERC8183Hook).interfaceId))
                 revert InvalidJob();
         }
 

@@ -8,7 +8,7 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
-import "./IACPHook.sol";
+import "./IERC8183Hook.sol";
 import "@openzeppelin/contracts/utils/introspection/ERC165Checker.sol";
 
 /**
@@ -17,7 +17,7 @@ import "@openzeppelin/contracts/utils/introspection/ERC165Checker.sol";
  *      Implements a job escrow state machine with optional hook extension points.
  *      Core state machine: Open -> Funded -> Submitted -> Completed | Rejected | Expired.
  *
- *      Hooks (IACPHook):
+ *      Hooks (IERC8183Hook):
  *        before* — called BEFORE state change, CAN revert to gate the transition.
  *        after*  — called AFTER state change for bookkeeping/side effects.
  *
@@ -190,7 +190,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         bytes memory data
     ) internal {
         if (hook != address(0)) {
-            IACPHook(hook).beforeAction(jobId, selector, data);
+            IERC8183Hook(hook).beforeAction(jobId, selector, data);
         }
     }
 
@@ -201,7 +201,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         bytes memory data
     ) internal {
         if (hook != address(0)) {
-            IACPHook(hook).afterAction(jobId, selector, data);
+            IERC8183Hook(hook).afterAction(jobId, selector, data);
         }
     }
 
@@ -222,7 +222,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
             if (
                 !ERC165Checker.supportsInterface(
                     hook,
-                    type(IACPHook).interfaceId
+                    type(IERC8183Hook).interfaceId
                 )
             ) revert InvalidHook();
         }

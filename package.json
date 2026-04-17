@@ -1,5 +1,5 @@
 {
-  "name": "acp-contracts",
+  "name": "erc8183-contracts",
   "version": "1.0.0",
   "description": "Reference implementation of ERC-8183: Agentic Commerce Protocol",
   "main": "index.js",
