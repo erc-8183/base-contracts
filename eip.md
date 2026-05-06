@@ -41,21 +41,21 @@ A **job** has exactly one of six states:
 Allowed transitions:
 
 - **Open → Funded**: Client or provider calls `setBudget(jobId, token, amount)` to agree on price and payment token, then client calls `fund(jobId, expectedBudget)`; contract pulls `job.budget` of the job's payment token from client into escrow.
-- **Open → Rejected**: Client calls `reject(jobId, reason?)`.
-- **Open → Expired**: When `block.timestamp >= job.expiredAt`, anyone (or client) may call `claimRefund(jobId)`; contract sets state to Expired. No refund to client as job has not been funded yet.
+- **Open → Rejected**: Client or provider calls `reject(jobId, reason?)`.
+- **Open → Expired**: When `block.timestamp >= job.expiredAt`, anyone may call `claimRefund(jobId)`; contract sets state to Expired. No refund to client as job has not been funded yet.
 - **Funded → Submitted**: Provider calls `submit(jobId, deliverable)`; signals that work has been completed and is ready for evaluation.
 - **Funded → Rejected**: Evaluator calls `reject(jobId, reason?)`; contract refunds client.
-- **Funded → Expired**: When `block.timestamp >= job.expiredAt`, anyone (or client) may call `claimRefund(jobId)`; contract sets state to Expired and refunds client.
-- **Submitted → Completed**: Evaluator calls `complete(jobId, reason?)`; contract distributes escrow to provider (and optional fee to treasury).
+- **Funded → Expired**: When `block.timestamp >= job.expiredAt`, anyone may call `claimRefund(jobId)`; contract sets state to Expired and refunds client.
+- **Submitted → Completed**: Evaluator calls `complete(jobId, reason?)`; contract distributes escrow to provider (and optional platform/evaluator fees).
 - **Submitted → Rejected**: Evaluator calls `reject(jobId, reason?)`; contract refunds client.
-- **Submitted → Expired**: When `block.timestamp >= job.expiredAt`, anyone (or client) may call `claimRefund(jobId)`; contract sets state to Expired and refunds client.
+- **Submitted → Expired**: When `block.timestamp >= job.expiredAt + EVALUATION_GRACE_PERIOD`, anyone may call `claimRefund(jobId)`; contract sets state to Expired and refunds client. The grace period (e.g. 1 hour in the reference implementation) protects an evaluator who is mid-review from being censored by a third-party refund call. Implementations MAY set the grace period length or omit it entirely.
 
 No other transitions are valid.
 
 ### Roles
 
-- **Client**: Creates job (with description), may set provider via `setProvider(jobId, provider, agentId?)` when job was created with no provider, sets budget with `setBudget(jobId, token, amount)`, funds escrow with `fund(jobId, expectedBudget)`, may reject **only when status is Open**. Receives refund on Rejected/Expired.
-- **Provider**: Set at creation or later via `setProvider`. May call `setBudget(jobId, token, amount)` to propose or negotiate a price and payment token. Calls `submit(jobId, deliverable)` when work is done to move the job from Funded to Submitted for evaluation. Receives payment when job is Completed. Does not call `complete` or `reject`.
+- **Client**: Creates job (with description), may set provider via `setProvider(jobId, provider, agentId?)` when job was created with no provider, funds escrow with `fund(jobId, expectedBudget)`, may reject when status is Open. Receives refund on Rejected/Expired. **MUST NOT be the provider** — an address cannot hold both client and provider roles on the same job.
+- **Provider**: Set at creation or later via `setProvider`. Calls `setBudget(jobId, token, amount)` to propose a price and payment token. Calls `submit(jobId, deliverable)` when work is done to move the job from Funded to Submitted for evaluation. May reject when status is Open (e.g. to decline the engagement before any escrow is locked). Receives payment when job is Completed. Does not call `complete` or `reject` once the job has been funded.
 - **Evaluator**: Single address per job, set at creation. When status is Submitted, **only** the evaluator MAY call `complete(jobId, reason?)` or `reject(jobId, reason?)`. When status is Funded, the evaluator MAY call `reject(jobId, reason?)` (before submission). MAY be the client (e.g. `evaluator = client`) so the client can complete or reject the job without a third party, or MAY be a **smart contract** that performs arbitrary checks (e.g. verifying a zero‑knowledge proof or aggregating off‑chain signals) before deciding whether to call `complete` or `reject` on the job. **MUST NOT be the provider** — an address cannot hold both roles on the same job.
 
 ### Job Data
@@ -78,28 +78,28 @@ Each job has its own [ERC-20](./eip-20.md) payment token. The token address is s
 Jobs MAY be created **without a provider** by passing `provider = address(0)` to `createJob`. In that case the client SHALL set the provider later via `setProvider(jobId, provider, agentId?)` before funding. This supports flows such as bidding or assignment after creation.
 
 - **setProvider(jobId, provider, agentId?)**
-Called by **client** only. SHALL revert if job is not Open, current `job.provider != address(0)`, or `provider == address(0)`. SHALL set `job.provider = provider`. `agentId` is the provider's [ERC-8004](./eip-8004.md) agent identity; if non-zero, the contract MAY verify that `provider` is the owner or operator of that agentId on the ERC-8004 registry, and SHALL set `job.providerAgentId = agentId`. SHALL emit an event (e.g. ProviderSet) including the agentId. Implementations MAY allow an operator role to call setProvider in the future; this specification only requires client-only for the minimal protocol.
+Called by **client** only. SHALL revert if job is not Open, the job has expired, the current `job.provider != address(0)`, `provider == address(0)`, or `provider == job.evaluator`. SHALL set `job.provider = provider`. `agentId` is the provider's [ERC-8004](./eip-8004.md) agent identity; if non-zero, the contract MAY verify that `provider` is the owner or operator of that agentId on the ERC-8004 registry, and SHALL set `job.providerAgentId = agentId`. SHALL emit an event (e.g. ProviderSet) including the agentId. Implementations MAY allow an operator role to call setProvider in the future; this specification only requires client-only for the minimal protocol.
 - **fund(jobId, expectedBudget)**
 SHALL revert if `job.provider == address(0)` (provider MUST be set before funding) or if `job.budget != expectedBudget` (front-running protection).
 
 ### Core Functions
 
 - **createJob(provider, evaluator, expiredAt, description, hook?, providerAgentId?)**
-Called by client. Creates job in Open with `client = msg.sender`, `provider`, `evaluator`, `expiredAt`, `description`, and optional `hook` address. SHALL revert if `evaluator` is zero or `expiredAt` is not at least 5 minutes in the future. SHALL revert if `provider == evaluator`. **Provider MAY be zero**; if so, client MUST call `setProvider` before `fund`. `hook` MAY be `address(0)` (no hook). `providerAgentId` is the provider's [ERC-8004](./eip-8004.md) agent identity; if `provider` is non-zero and `providerAgentId` is non-zero, SHALL set `job.providerAgentId = providerAgentId`; the contract MAY verify that `provider` is the owner or operator of that `providerAgentId` on the ERC-8004 registry. Returns `jobId`.
+Called by client. Creates job in Open with `client = msg.sender`, `provider`, `evaluator`, `expiredAt`, `description`, and optional `hook` address. SHALL revert if `evaluator` is zero, if `expiredAt` is not at least 5 minutes in the future, if `provider == evaluator`, or if `msg.sender == provider`. **Provider MAY be zero**; if so, client MUST call `setProvider` before `fund`. `hook` MAY be `address(0)` (no hook); if non-zero, the hook MUST be admin-whitelisted and SHOULD advertise support for the `IERC8183Hook` interface via ERC-165. `providerAgentId` is the provider's [ERC-8004](./eip-8004.md) agent identity; if `provider` is non-zero and `providerAgentId` is non-zero, SHALL set `job.providerAgentId = providerAgentId`; the contract MAY verify that `provider` is the owner or operator of that `providerAgentId` on the ERC-8004 registry. Returns `jobId`.
 - **setProvider(jobId, provider, agentId?)**
-Called by client. SHALL revert if job is not Open, current `job.provider != address(0)`, `provider == address(0)`, or `provider == job.evaluator`. SHALL set `job.provider = provider`. `agentId` is the provider's [ERC-8004](./eip-8004.md) agent identity; if non-zero, SHALL set `job.providerAgentId = agentId`; the contract MAY verify that `provider` is the owner or operator of that agentId on the ERC-8004 registry.
+Called by client. SHALL revert if job is not Open, has expired, current `job.provider != address(0)`, `provider == address(0)`, or `provider == job.evaluator`. SHALL set `job.provider = provider`. `agentId` is the provider's [ERC-8004](./eip-8004.md) agent identity; if non-zero, SHALL set `job.providerAgentId = agentId`; the contract MAY verify that `provider` is the owner or operator of that agentId on the ERC-8004 registry.
 - **setBudget(jobId, token, amount, optParams?)**
-Called by client or provider. Sets `job.paymentToken = token` and `job.budget = amount`. SHALL revert if job is not Open, caller is not client or provider, or `token` is the zero address. `optParams` forwarded to hook if set.
+Called by the job's provider. Sets `job.paymentToken = token` and `job.budget = amount`. SHALL revert if job is not Open, has expired, caller is not the provider, or `token` is the zero address. Implementations SHOULD restrict `token` to an admin-managed allowlist of tokens with vetted ERC-20 semantics, to reject tokens that would break escrow accounting (e.g. fee-on-transfer, rebasing, transfer-hooked, pausable, or blacklist tokens); the reference implementation reverts with `PaymentTokenNotAllowed` for tokens not on the allowlist. `optParams` forwarded to hook if set.
 - **fund(jobId, expectedBudget, optParams?)**
-Called by client. SHALL revert if job is not Open, caller is not client, **provider is not set** (`job.provider == address(0)`), `job.budget != expectedBudget` (front-running protection), or job has expired (`block.timestamp >= expiredAt`). SHALL transfer `job.budget` of the job's payment token (`job.paymentToken`) from client to the contract (escrow) and set status to Funded. `optParams` forwarded to hook if set.
+Called by client. SHALL revert if job is not Open, caller is not client, **provider is not set** (`job.provider == address(0)`), `job.budget != expectedBudget` (front-running protection), or job has expired (`block.timestamp >= expiredAt`). SHALL transfer `job.budget` of the job's payment token (`job.paymentToken`) from client to the contract (escrow) and set status to Funded. Implementations SHOULD verify that the contract's balance increased by exactly `job.budget` and revert otherwise, to defend against fee-on-transfer and rebasing tokens that would silently leave the escrow short; the reference implementation reverts with `UnexpectedFundedAmount` in that case. `optParams` forwarded to hook if set.
 - **submit(jobId, deliverable, optParams?)**
-Called by provider only. SHALL revert if caller is not the job's provider. SHALL revert if job is not Funded, unless the job is Open with `budget == 0` (zero-budget job, no escrow needed). SHALL set status to Submitted. `deliverable` (`bytes32`) is a reference to submitted work (e.g. hash of off-chain deliverable, IPFS CID, attestation commitment). SHALL emit an event including `deliverable` (e.g. JobSubmitted). `optParams` forwarded to hook if set.
+Called by provider only. SHALL revert if caller is not the job's provider, or if `job.expiredAt > 0` and the job has expired. SHALL revert if job is not Funded, unless the job is Open with `budget == 0` (zero-budget job, no escrow needed). SHALL set status to Submitted and SHOULD record `submittedAt = block.timestamp` for grace-period accounting. `deliverable` (`bytes32`) is a reference to submitted work (e.g. hash of off-chain deliverable, IPFS CID, attestation commitment). SHALL emit an event including `deliverable` (e.g. JobSubmitted). `optParams` forwarded to hook if set.
 - **complete(jobId, reason, optParams?)**
-Called by evaluator only. SHALL revert if job is not Submitted or caller is not the job's evaluator. SHALL set status to Completed. SHALL transfer escrowed funds to provider (minus optional platform fee to a configurable treasury and optional evaluator fee to the evaluator address). `reason` MAY be `bytes32(0)` or an attestation hash (OPTIONAL). SHALL emit an event including `reason` if provided. `optParams` forwarded to hook if set.
+Called by evaluator only. SHALL revert if job is not Submitted or caller is not the job's evaluator. SHALL set status to Completed. SHALL transfer escrowed funds to provider, minus optional platform fee to a configurable treasury and optional evaluator fee paid to the evaluator address. `reason` MAY be `bytes32(0)` or an attestation hash (OPTIONAL). SHALL emit an event including `reason` if provided. `optParams` forwarded to hook if set.
 - **reject(jobId, reason, optParams?)**
-Called by **client when job is Open** or by **evaluator when job is Funded or Submitted**. SHALL revert if job is not Open, Funded, or Submitted, or caller is not the client (when Open) or the evaluator (when Funded or Submitted). SHALL set status to Rejected. If Funded or Submitted, SHALL refund escrow to client. `reason` OPTIONAL. SHALL emit an event including `reason` and the caller (rejector) if provided. `optParams` forwarded to hook if set.
+Called by **client or provider when job is Open**, or by **evaluator when job is Funded or Submitted**. SHALL revert if job is not Open, Funded, or Submitted, or if the caller is not authorised for the current status. SHALL set status to Rejected. If Funded or Submitted, SHALL refund escrow to client. `reason` OPTIONAL. SHALL emit an event including `reason` and the caller (rejector) if provided. `optParams` forwarded to hook if set.
 - **claimRefund(jobId)**
-Callable by anyone when the job has expired (`block.timestamp >= expiredAt`) and status is Open, Funded, or Submitted. SHALL revert if job is not in one of those statuses or has not yet expired. SHALL set status to Expired. If the job has a funded escrow (`budget > 0`), SHALL transfer the full escrow to the client.
+Callable by anyone when status is Open, Funded, or Submitted. SHALL revert if status is Open or Funded and `block.timestamp < job.expiredAt`. SHALL revert if status is Submitted and `block.timestamp < job.expiredAt + EVALUATION_GRACE_PERIOD` (the grace period protects an evaluator who is mid-review from being censored by a third-party refund call; implementations MAY set the grace period length or omit it). SHALL set status to Expired. If the prior status was Funded or Submitted and `budget > 0`, SHALL transfer the full escrow to the client. SHALL NOT be hookable.
 
 ### Attestation
 
@@ -112,7 +112,7 @@ Implementations MAY charge a **platform fee** and/or an **evaluator fee** (both 
 
 ### Hooks (OPTIONAL)
 
-Implementations MAY support an optional **hook contract** per job to extend the core protocol without modifying it. The hook address is set at job creation (or `address(0)` for no hook) and stored on the job. A **non‑hooked kernel** that ignores the `hook` field (or always sets it to `address(0)`) is fully compliant with this specification; the reference `AgenticCommerce` contract follows this minimal pattern, while `AgenticCommerceHooked` is an **extension** that layers the hook callbacks on top of the same lifecycle.
+Implementations MAY support an optional **hook contract** per job to extend the core protocol without modifying it. The hook address is set at job creation (or `address(0)` for no hook) and stored on the job. A **non-hooked kernel** that ignores the `hook` field (or always sets it to `address(0)`) is fully compliant with this specification. The reference `ERC8183` contract supports both modes in a single contract: jobs with `hook == address(0)` skip all callbacks, and jobs with a whitelisted hook receive `beforeAction` / `afterAction` callbacks on the hookable functions listed below.
 
 A hook contract SHALL implement the `IERC8183Hook` interface — just two functions:
 
@@ -135,11 +135,11 @@ function beforeAction(uint256 jobId, bytes4 selector, bytes calldata data) exter
 }
 ```
 
-When a job has a hook set, the core contract SHALL call `hook.beforeAction(...)` and `hook.afterAction(...)` around each hookable function. `createJob` is a special case: only `afterAction` is called (there is no `beforeAction` at creation).
+When a job has a hook set, the core contract SHALL call `hook.beforeAction(...)` and `hook.afterAction(...)` around each hookable function. `createJob` is intentionally not hookable in the reference implementation — the hook is stored on the job, but no callbacks fire on creation. Implementations MAY add an `afterAction`-only callback for `createJob` if they need post-creation bookkeeping; conformant non-hooked kernels simply ignore the field.
 
 | Core function  | Hookable |
 | -------------- | -------- |
-| `createJob`    | **After only** — `afterAction` called post-creation; no `beforeAction` |
+| `createJob`    | **No** — hook is stored on the job but no callback fires on creation in the reference implementation |
 | `setProvider`  | **No**   |
 | `setBudget`    | Yes      |
 | `fund`         | Yes      |
@@ -154,7 +154,6 @@ The `data` parameter passed to hooks contains the core function's parameters enc
 
 | Core function  | `data` encoding                                      |
 | -------------- | ---------------------------------------------------- |
-| `createJob`    | `abi.encode(address client, address provider, address evaluator)` |
 | `setBudget`    | `abi.encode(address caller, address token, uint256 amount, bytes optParams)` |
 | `fund`         | `abi.encode(address caller, bytes optParams)`         |
 | `submit`       | `abi.encode(address caller, bytes32 deliverable, bytes optParams)` |
@@ -282,16 +281,20 @@ Step 5 — job continues normally
 
 Implementations SHOULD emit at least:
 
-- **JobCreated**(jobId, client, provider, evaluator, expiredAt)
-- **ProviderSet**(jobId, provider, agentId) — when provider is set on a job that was created without one; agentId is 0 if not specified
+- **JobCreated**(jobId, client, provider, evaluator, expiredAt, hook) — includes the hook address (`address(0)` if no hook)
+- **ProviderSet**(jobId, provider, agentId) — when provider is set on a job that was created without one; `agentId` is 0 if not specified
 - **BudgetSet**(jobId, token, amount) — includes the payment token address
 - **JobFunded**(jobId, client, amount)
 - **JobSubmitted**(jobId, provider, deliverable) — when provider submits work for evaluation
 - **JobCompleted**(jobId, evaluator, reason)
 - **JobRejected**(jobId, rejector, reason)
 - **JobExpired**(jobId)
-- **PaymentReleased**(jobId, provider, amount)
+- **PaymentReleased**(jobId, provider, amount) — net amount paid to the provider on completion
+- **PlatformFeePaid**(jobId, platformTreasury, amount) — only emitted when a non-zero platform fee is taken
+- **EvaluatorFeePaid**(jobId, evaluator, amount) — only emitted when a non-zero evaluator fee is taken
 - **Refunded**(jobId, client, amount)
+
+Implementations that add admin tooling SHOULD also emit operational events (e.g. `HookWhitelistUpdated`, `PaymentTokenAllowlistUpdated`, `HookDetached`, `PlatformFeeUpdated`, `EvaluatorFeeUpdated`, `EmergencyWithdraw`) so off-chain indexers can track configuration changes.
 
 ## Rationale
 
@@ -366,7 +369,7 @@ To support gasless execution — where a client, provider, or evaluator signs an
 ```solidity
 import {ERC2771Context} from "@openzeppelin/contracts/metatx/ERC2771Context.sol";
 
-contract AgenticCommerce is ERC2771Context, ... {
+contract ERC8183 is ERC2771Context, ... {
     constructor(address trustedForwarder, ...)
         ERC2771Context(trustedForwarder) { ... }
 
@@ -392,7 +395,7 @@ No backward compatibility issues found.
 
 ## Reference Implementation
 
-The reference implementation consists of two contracts: `IERC8183Hook`, the optional and minimal hook interface that developers implement, and `AgenticCommerce`, the core Job primitive with escrow and optional hook extension points.
+The reference implementation consists of two contracts: `IERC8183Hook`, the optional and minimal hook interface that developers implement, and `ERC8183`, the core Job primitive with escrow and optional hook extension points.
 
 ### IERC8183Hook.sol
 
@@ -407,7 +410,7 @@ interface IERC8183Hook is IERC165 {
 }
 ```
 
-### AgenticCommerce.sol
+### ERC8183.sol
 
 ```solidity
 pragma solidity ^0.8.28;
@@ -415,53 +418,51 @@ pragma solidity ^0.8.28;
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import "./IERC8183Hook.sol";
 import "@openzeppelin/contracts/utils/introspection/ERC165Checker.sol";
 
-contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyGuardTransient, UUPSUpgradeable {
+contract ERC8183 is
+    Initializable,
+    AccessControlUpgradeable,
+    PausableUpgradeable,
+    ReentrancyGuardTransient,
+    UUPSUpgradeable
+{
     using SafeERC20 for IERC20;
 
-    bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
-
-    enum JobStatus {
-        Open,
-        Funded,
-        Submitted,
-        Completed,
-        Rejected,
-        Expired
-    }
+    enum JobStatus { Open, Funded, Submitted, Completed, Rejected, Expired }
 
     struct Job {
-        uint256 id;
         address client;
-        address provider;
-        address evaluator;
-        string description;
-        uint256 budget;
-        uint256 expiredAt;
         JobStatus status;
+        address provider;
+        uint48 expiredAt;
+        address evaluator;
+        uint48 submittedAt;
+        uint256 budget;
         address hook;
         address paymentToken;
         uint256 providerAgentId;
+        string description;
     }
 
-    uint256 public platformFeeBP;
+    bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
+    uint256 public constant EVALUATION_GRACE_PERIOD = 1 hours;
+
+    uint256 public platformFeeBP;       // 10000 = 100%
     address public platformTreasury;
     uint256 public evaluatorFeeBP;
 
     mapping(uint256 => Job) public jobs;
     uint256 public jobCounter;
     mapping(address => bool) public whitelistedHooks;
-    mapping(uint256 jobId => bool hasBudget) public jobHasBudget;
+    mapping(address => bool) public allowedPaymentTokens;
 
-    event JobCreated(
-        uint256 indexed jobId, address indexed client, address indexed provider,
-        address evaluator, uint256 expiredAt, address hook
-    );
+    event JobCreated(uint256 indexed jobId, address indexed client, address indexed provider, address evaluator, uint48 expiredAt, address hook);
     event ProviderSet(uint256 indexed jobId, address indexed provider, uint256 agentId);
     event BudgetSet(uint256 indexed jobId, address indexed token, uint256 amount);
     event JobFunded(uint256 indexed jobId, address indexed client, uint256 amount);
@@ -470,35 +471,42 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
     event JobRejected(uint256 indexed jobId, address indexed rejector, bytes32 reason);
     event JobExpired(uint256 indexed jobId);
     event PaymentReleased(uint256 indexed jobId, address indexed provider, uint256 amount);
+    event PlatformFeePaid(uint256 indexed jobId, address indexed platformTreasury, uint256 amount);
     event EvaluatorFeePaid(uint256 indexed jobId, address indexed evaluator, uint256 amount);
     event Refunded(uint256 indexed jobId, address indexed client, uint256 amount);
     event HookWhitelistUpdated(address indexed hook, bool status);
+    event PaymentTokenAllowlistUpdated(address indexed token, bool status);
+    event HookDetached(uint256 indexed jobId, address indexed hook);
+    event PlatformFeeUpdated(uint256 feeBP, address indexed treasury);
+    event EvaluatorFeeUpdated(uint256 feeBP);
+    event EmergencyWithdraw(address indexed token, address indexed to, uint256 amount);
 
     error InvalidJob();
+    error InvalidHook();
     error WrongStatus();
     error Unauthorized();
     error ZeroAddress();
     error ExpiryTooShort();
-    error ZeroBudget();
     error ProviderNotSet();
     error FeesTooHigh();
     error HookNotWhitelisted();
     error BudgetMismatch();
+    error ProviderCannotBeEvaluator();
+    error ClientCannotBeProvider();
+    error GracePeriodActive();
+    error PaymentTokenNotAllowed();
+    error UnexpectedFundedAmount();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() {
-        _disableInitializers();
-    }
+    constructor() { _disableInitializers(); }
 
-    function initialize(address treasury_) public initializer {
-        if (treasury_ == address(0))
-            revert ZeroAddress();
-
+    function initialize(address treasury_, address admin_) public initializer {
+        if (treasury_ == address(0) || admin_ == address(0)) revert ZeroAddress();
         __AccessControl_init();
-
+        __Pausable_init();
         platformTreasury = treasury_;
-        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
-        _grantRole(ADMIN_ROLE, msg.sender);
+        _grantRole(DEFAULT_ADMIN_ROLE, admin_);
+        _grantRole(ADMIN_ROLE, admin_);
         whitelistedHooks[address(0)] = true;
     }
 
@@ -506,16 +514,32 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
 
     // ──────────────────── Admin ────────────────────
 
+    function pause() external onlyRole(ADMIN_ROLE) { _pause(); }
+    function unpause() external onlyRole(ADMIN_ROLE) { _unpause(); }
+
+    function emergencyWithdraw(address token, address to, uint256 amount) external onlyRole(ADMIN_ROLE) whenPaused {
+        if (to == address(0)) revert ZeroAddress();
+        if (token == address(0)) {
+            (bool success,) = payable(to).call{value: amount}("");
+            require(success, "Transfer failed");
+        } else {
+            IERC20(token).safeTransfer(to, amount);
+        }
+        emit EmergencyWithdraw(token, to, amount);
+    }
+
     function setPlatformFee(uint256 feeBP_, address treasury_) external onlyRole(ADMIN_ROLE) {
         if (treasury_ == address(0)) revert ZeroAddress();
         if (feeBP_ + evaluatorFeeBP > 10000) revert FeesTooHigh();
         platformFeeBP = feeBP_;
         platformTreasury = treasury_;
+        emit PlatformFeeUpdated(feeBP_, treasury_);
     }
 
     function setEvaluatorFee(uint256 feeBP_) external onlyRole(ADMIN_ROLE) {
         if (feeBP_ + platformFeeBP > 10000) revert FeesTooHigh();
         evaluatorFeeBP = feeBP_;
+        emit EvaluatorFeeUpdated(feeBP_);
     }
 
     function setHookWhitelist(address hook, bool status) external onlyRole(ADMIN_ROLE) {
@@ -524,73 +548,96 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         emit HookWhitelistUpdated(hook, status);
     }
 
-    // ──────────────────── Hook Helpers ────────────────────
+    function setPaymentTokenAllowed(address token, bool status) external onlyRole(ADMIN_ROLE) {
+        if (token == address(0)) revert ZeroAddress();
+        allowedPaymentTokens[token] = status;
+        emit PaymentTokenAllowlistUpdated(token, status);
+    }
 
-    function _beforeHook(address hook, uint256 jobId, bytes4 selector, bytes memory data) internal {
-        if (hook != address(0)) {
-            IERC8183Hook(hook).beforeAction(jobId, selector, data);
+    function batchDetachHook(uint256[] calldata jobIds) external onlyRole(ADMIN_ROLE) {
+        for (uint256 i = 0; i < jobIds.length; i++) {
+            uint256 jobId = jobIds[i];
+            if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
+            Job storage job = jobs[jobId];
+            address oldHook = job.hook;
+            if (oldHook == address(0)) continue;
+            job.hook = address(0);
+            emit HookDetached(jobId, oldHook);
         }
     }
 
+    // ──────────────────── Hook Helpers ────────────────────
+
+    function _beforeHook(address hook, uint256 jobId, bytes4 selector, bytes memory data) internal {
+        if (hook != address(0)) IERC8183Hook(hook).beforeAction(jobId, selector, data);
+    }
+
     function _afterHook(address hook, uint256 jobId, bytes4 selector, bytes memory data) internal {
-        if (hook != address(0)) {
-            IERC8183Hook(hook).afterAction(jobId, selector, data);
-        }
+        if (hook != address(0)) IERC8183Hook(hook).afterAction(jobId, selector, data);
     }
 
     // ──────────────────── Job Lifecycle ────────────────────
 
     function createJob(
-        address provider, address evaluator, uint256 expiredAt,
-        string calldata description, address hook, uint256 agentId
-    ) external nonReentrant returns (uint256) {
-        if (evaluator == address(0)) revert ZeroAddress();
+        address provider,
+        address evaluator,
+        uint48 expiredAt,
+        string calldata description,
+        address hook,
+        uint256 providerAgentId
+    ) external whenNotPaused nonReentrant returns (uint256) {
         if (expiredAt <= block.timestamp + 5 minutes) revert ExpiryTooShort();
+        if (msg.sender == provider) revert ClientCannotBeProvider();
+        if (evaluator == address(0)) revert ZeroAddress();
+        if (evaluator == provider) revert ProviderCannotBeEvaluator();
         if (!whitelistedHooks[hook]) revert HookNotWhitelisted();
         if (hook != address(0)) {
-            if (!ERC165Checker.supportsInterface(hook, type(IERC8183Hook).interfaceId))
-                revert InvalidJob();
+            if (!ERC165Checker.supportsInterface(hook, type(IERC8183Hook).interfaceId)) revert InvalidHook();
         }
 
         uint256 jobId = ++jobCounter;
         jobs[jobId] = Job({
-            id: jobId,
             client: msg.sender,
-            provider: provider,
-            evaluator: evaluator,
-            description: description,
-            budget: 0,
-            expiredAt: expiredAt,
             status: JobStatus.Open,
+            provider: provider,
+            expiredAt: expiredAt,
+            evaluator: evaluator,
+            submittedAt: 0,
+            budget: 0,
             hook: hook,
             paymentToken: address(0),
-            providerAgentId: provider != address(0) ? agentId : 0
+            providerAgentId: provider != address(0) ? providerAgentId : 0,
+            description: description
         });
 
         emit JobCreated(jobId, msg.sender, provider, evaluator, expiredAt, hook);
-        _afterHook(hook, jobId, msg.sig, abi.encode(msg.sender, provider, evaluator));
-
         return jobId;
     }
 
-    function setProvider(uint256 jobId, address provider_, uint256 agentId) external {
+    function setProvider(uint256 jobId, address provider_, uint256 agentId) external whenNotPaused {
         Job storage job = jobs[jobId];
-        if (job.id == 0) revert InvalidJob();
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
+        if (block.timestamp >= job.expiredAt) revert WrongStatus();
         if (msg.sender != job.client) revert Unauthorized();
         if (job.provider != address(0)) revert WrongStatus();
         if (provider_ == address(0)) revert ZeroAddress();
+        if (provider_ == job.evaluator) revert ProviderCannotBeEvaluator();
         job.provider = provider_;
         job.providerAgentId = agentId;
         emit ProviderSet(jobId, provider_, agentId);
     }
 
-    function setBudget(uint256 jobId, address token, uint256 amount, bytes calldata optParams) external nonReentrant {
+    function setBudget(uint256 jobId, address token, uint256 amount, bytes calldata optParams)
+        external whenNotPaused nonReentrant
+    {
         Job storage job = jobs[jobId];
-        if (job.id == 0) revert InvalidJob();
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
-        if (msg.sender != job.client && msg.sender != job.provider) revert Unauthorized();
+        if (block.timestamp >= job.expiredAt) revert WrongStatus();
+        if (msg.sender != job.provider) revert Unauthorized();
         if (token == address(0)) revert ZeroAddress();
+        if (!allowedPaymentTokens[token]) revert PaymentTokenNotAllowed();
 
         bytes memory data = abi.encode(msg.sender, token, amount, optParams);
         _beforeHook(job.hook, jobId, msg.sig, data);
@@ -598,53 +645,64 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         job.paymentToken = token;
         job.budget = amount;
         emit BudgetSet(jobId, token, amount);
-        jobHasBudget[jobId] = true;
 
         _afterHook(job.hook, jobId, msg.sig, data);
     }
 
-    function fund(uint256 jobId, uint256 expectedBudget, bytes calldata optParams) external nonReentrant {
+    function fund(uint256 jobId, uint256 expectedBudget, bytes calldata optParams)
+        external whenNotPaused nonReentrant
+    {
         Job storage job = jobs[jobId];
-        if (job.id == 0) revert InvalidJob();
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
         if (msg.sender != job.client) revert Unauthorized();
         if (job.provider == address(0)) revert ProviderNotSet();
-        if (job.budget != expectedBudget) revert BudgetMismatch();
         if (block.timestamp >= job.expiredAt) revert WrongStatus();
+        if (job.budget != expectedBudget) revert BudgetMismatch();
 
         bytes memory data = abi.encode(msg.sender, optParams);
         _beforeHook(job.hook, jobId, msg.sig, data);
 
         job.status = JobStatus.Funded;
         if (job.budget > 0) {
-            IERC20(job.paymentToken).safeTransferFrom(job.client, address(this), job.budget);
+            IERC20 token = IERC20(job.paymentToken);
+            uint256 balanceBefore = token.balanceOf(address(this));
+            token.safeTransferFrom(job.client, address(this), job.budget);
+            uint256 received = token.balanceOf(address(this)) - balanceBefore;
+            if (received != job.budget) revert UnexpectedFundedAmount();
         }
         emit JobFunded(jobId, job.client, job.budget);
 
         _afterHook(job.hook, jobId, msg.sig, data);
     }
 
-    function submit(uint256 jobId, bytes32 deliverable, bytes calldata optParams) external nonReentrant {
+    function submit(uint256 jobId, bytes32 deliverable, bytes calldata optParams)
+        external whenNotPaused nonReentrant
+    {
         Job storage job = jobs[jobId];
-        if (job.id == 0) revert InvalidJob();
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (
             job.status != JobStatus.Funded &&
             (job.status != JobStatus.Open || job.budget > 0)
         ) revert WrongStatus();
+        if (job.expiredAt != 0 && block.timestamp >= job.expiredAt) revert WrongStatus();
         if (msg.sender != job.provider) revert Unauthorized();
 
         bytes memory data = abi.encode(msg.sender, deliverable, optParams);
         _beforeHook(job.hook, jobId, msg.sig, data);
 
         job.status = JobStatus.Submitted;
+        job.submittedAt = uint48(block.timestamp);
         emit JobSubmitted(jobId, job.provider, deliverable);
 
         _afterHook(job.hook, jobId, msg.sig, data);
     }
 
-    function complete(uint256 jobId, bytes32 reason, bytes calldata optParams) external nonReentrant {
+    function complete(uint256 jobId, bytes32 reason, bytes calldata optParams)
+        external whenNotPaused nonReentrant
+    {
         Job storage job = jobs[jobId];
-        if (job.id == 0) revert InvalidJob();
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Submitted) revert WrongStatus();
         if (msg.sender != job.evaluator) revert Unauthorized();
 
@@ -661,6 +719,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         IERC20 token = IERC20(job.paymentToken);
         if (platformFee > 0) {
             token.safeTransfer(platformTreasury, platformFee);
+            emit PlatformFeePaid(jobId, platformTreasury, platformFee);
         }
         if (evalFee > 0) {
             token.safeTransfer(job.evaluator, evalFee);
@@ -668,20 +727,22 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         }
         if (net > 0) {
             token.safeTransfer(job.provider, net);
+            emit PaymentReleased(jobId, job.provider, net);
         }
 
         emit JobCompleted(jobId, job.evaluator, reason);
-        emit PaymentReleased(jobId, job.provider, net);
 
         _afterHook(job.hook, jobId, msg.sig, data);
     }
 
-    function reject(uint256 jobId, bytes32 reason, bytes calldata optParams) external nonReentrant {
+    function reject(uint256 jobId, bytes32 reason, bytes calldata optParams)
+        external whenNotPaused nonReentrant
+    {
         Job storage job = jobs[jobId];
-        if (job.id == 0) revert InvalidJob();
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
 
         if (job.status == JobStatus.Open) {
-            if (msg.sender != job.client) revert Unauthorized();
+            if (msg.sender != job.client && msg.sender != job.provider) revert Unauthorized();
         } else if (job.status == JobStatus.Funded || job.status == JobStatus.Submitted) {
             if (msg.sender != job.evaluator) revert Unauthorized();
         } else {
@@ -704,16 +765,24 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         _afterHook(job.hook, jobId, msg.sig, data);
     }
 
-    function claimRefund(uint256 jobId) external nonReentrant {
+    function claimRefund(uint256 jobId) external whenNotPaused nonReentrant {
         Job storage job = jobs[jobId];
-        if (job.id == 0) revert InvalidJob();
-        if (job.status != JobStatus.Funded && job.status != JobStatus.Submitted)
-            revert WrongStatus();
-        if (block.timestamp < job.expiredAt) revert WrongStatus();
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
+        if (
+            job.status != JobStatus.Open &&
+            job.status != JobStatus.Funded &&
+            job.status != JobStatus.Submitted
+        ) revert WrongStatus();
+        if (job.status == JobStatus.Submitted) {
+            if (block.timestamp < job.expiredAt + EVALUATION_GRACE_PERIOD) revert GracePeriodActive();
+        } else {
+            if (block.timestamp < job.expiredAt) revert WrongStatus();
+        }
 
+        JobStatus prev = job.status;
         job.status = JobStatus.Expired;
 
-        if (job.budget > 0) {
+        if (job.budget > 0 && (prev == JobStatus.Funded || prev == JobStatus.Submitted)) {
             IERC20(job.paymentToken).safeTransfer(job.client, job.budget);
             emit Refunded(jobId, job.client, job.budget);
         }

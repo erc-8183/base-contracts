@@ -7,20 +7,20 @@ A client requests an AI-generated image. No hook is used — the core handles al
 ```mermaid
 sequenceDiagram
     participant C as Client
-    participant Core as AgenticCommerce
+    participant Core as ERC8183
     participant P as Provider
     participant E as Evaluator
 
     Note over C,E: -- Job Creation --
-    C->>Core: createJob(provider, evaluator, expiry,<br/>"Generate landscape wallpaper", address(0))
+    C->>Core: createJob(provider, evaluator, expiry,<br/>"Generate landscape wallpaper", address(0), 0)
     Note over Core: Status: Open (no hook)
 
     Note over C,E: -- Budget --
-    P->>Core: setBudget(jobId, 20 USDC, "0x")
+    P->>Core: setBudget(jobId, USDC, 20 USDC, "0x")
 
     Note over C,E: -- Funding --
     rect rgb(255, 243, 224)
-        C->>Core: fund(jobId, "0x")
+        C->>Core: fund(jobId, 20 USDC, "0x")
         Note over C,Core: 20 USDC: Client -> Core (escrowed)<br/>Open -> Funded
     end
 

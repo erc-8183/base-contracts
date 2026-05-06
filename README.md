@@ -39,19 +39,24 @@ When `hook == address(0)`, the contract operates as a standalone job escrow with
 
 ```
 contracts/
-├── AgenticCommerce.sol    # Core state machine, escrow, fees, hooks
-├── IERC8183Hook.sol       # Hook interface (beforeAction/afterAction)
+├── ERC8183.sol                 # Core state machine, escrow, fees, hooks
+├── IERC8183Hook.sol            # Hook interface (beforeAction/afterAction)
 └── mocks/
-    ├── MockUSDC.sol        # Test ERC20, 6 decimals
-    └── MockCBBTC.sol       # Test ERC20, 8 decimals
+    ├── MockUSDC.sol            # Test ERC20, 6 decimals
+    ├── MockCBBTC.sol           # Test ERC20, 8 decimals
+    └── MockFeeOnTransferToken.sol  # Test ERC20 that takes a transfer fee (used to verify rejection)
 ```
 
 ## Architecture
 
 - **Upgradeable** — UUPS proxy pattern via OpenZeppelin
-- **Access control** — role-based admin for fees and hook whitelisting
+- **Access control** — role-based admin for fees, hook whitelisting, and payment token allowlisting
+- **Pausable** — admin can pause user-facing lifecycle functions and use `emergencyWithdraw` while paused
 - **CEI pattern** — checks, effects, interactions throughout
 - **Reentrancy protection** — transient storage guard on all state-changing functions
+- **Payment token allowlist** — only admin-vetted ERC-20s can be used as payment tokens
+- **Fee-on-transfer / rebasing rejection** — `fund` snapshots the contract balance and reverts if the received amount differs from the budget
+- **Evaluator grace period** — after expiry, a Submitted job cannot be force-refunded for `EVALUATION_GRACE_PERIOD` (1 hour), giving the evaluator time to complete or reject
 - **Hook safety** — `claimRefund` is intentionally not hookable so refunds cannot be blocked
 
 See [docs/01-architecture.md](docs/01-architecture.md) for state machine and sequence diagrams.
