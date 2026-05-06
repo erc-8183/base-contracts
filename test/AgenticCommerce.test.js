@@ -70,15 +70,17 @@ describe("Image Generation", function () {
     await core.connect(client).createJob(provider.address, evaluator.address, expiry, "Job paid in USDC", hookAddr, 0);
     const jobId1 = 1n;
 
-    await core.connect(provider).setBudget(jobId1, usdcAddr, TWENTY_USDC_AMT, "0x");
+    await core.connect(provider).setTerms(jobId1, usdcAddr, TWENTY_USDC_AMT, "USDC job terms", "0x");
     expect((await core.getJob(jobId1)).paymentToken).to.equal(usdcAddr);
+    expect((await core.getJob(jobId1)).description).to.equal("USDC job terms");
 
     // Job 2: paid in cbBTC
     await core.connect(client).createJob(provider.address, evaluator.address, expiry, "Job paid in cbBTC", hookAddr, 0);
     const jobId2 = 2n;
 
-    await core.connect(provider).setBudget(jobId2, cbbtcAddr, ONE_CBBTC, "0x");
+    await core.connect(provider).setTerms(jobId2, cbbtcAddr, ONE_CBBTC, "cbBTC job terms", "0x");
     expect((await core.getJob(jobId2)).paymentToken).to.equal(cbbtcAddr);
+    expect((await core.getJob(jobId2)).description).to.equal("cbBTC job terms");
 
     // Fund both
     await core.connect(client).fund(jobId1, "0x");
@@ -170,9 +172,9 @@ describe("Image Generation", function () {
     // Step 2: Provider sets budget to 20 USDC
     // ──────────────────────────────────────────────────────────
     const usdcAddr = await usdc.getAddress();
-    await expect(core.connect(provider).setBudget(jobId, usdcAddr, TWENTY_USDC, "0x"))
-      .to.emit(core, "BudgetSet")
-      .withArgs(jobId, usdcAddr, TWENTY_USDC);
+    await expect(core.connect(provider).setTerms(jobId, usdcAddr, TWENTY_USDC, "Generate a beautiful landscape wallpaper image", "0x"))
+      .to.emit(core, "TermsSet")
+      .withArgs(jobId, usdcAddr, TWENTY_USDC, "Generate a beautiful landscape wallpaper image");
 
     expect((await core.getJob(jobId)).budget).to.equal(TWENTY_USDC);
 

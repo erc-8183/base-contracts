@@ -58,7 +58,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
     mapping(uint256 => Job) public jobs;
     uint256 public jobCounter;
     mapping(address => bool) public whitelistedHooks;
-    mapping(uint256 jobId => bool hasBudget) public jobHasBudget;
+    mapping(uint256 jobId => bool hasTerms) public jobHasTerms;
 
     event JobCreated(
         uint256 indexed jobId,
@@ -69,7 +69,7 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         address hook
     );
     event ProviderSet(uint256 indexed jobId, address indexed provider, uint256 agentId);
-    event BudgetSet(uint256 indexed jobId, address indexed token, uint256 amount);
+    event TermsSet(uint256 indexed jobId, address indexed token, uint256 amount, string description);
     event JobFunded(
         uint256 indexed jobId,
         address indexed client,
@@ -259,10 +259,11 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         emit ProviderSet(jobId, provider_, agentId);
     }
 
-    function setBudget(
+    function setTerms(
         uint256 jobId,
         address token,
         uint256 amount,
+        string calldata description,
         bytes calldata optParams
     ) external nonReentrant {
         Job storage job = jobs[jobId];
@@ -271,13 +272,16 @@ contract AgenticCommerce is Initializable, AccessControlUpgradeable, ReentrancyG
         if (msg.sender != job.client && msg.sender != job.provider) revert Unauthorized();
         if (token == address(0)) revert ZeroAddress();
 
-        bytes memory data = abi.encode(msg.sender, token, amount, optParams);
+        bytes memory data = abi.encode(msg.sender, token, amount, description, optParams);
         _beforeHook(job.hook, jobId, msg.sig, data);
 
         job.paymentToken = token;
         job.budget = amount;
-        emit BudgetSet(jobId, token, amount);
-        jobHasBudget[jobId] = true;
+        if (bytes(description).length > 0) {
+            job.description = description;
+        }
+        emit TermsSet(jobId, token, amount, description);
+        jobHasTerms[jobId] = true;
 
         _afterHook(job.hook, jobId, msg.sig, data);
     }
