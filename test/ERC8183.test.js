@@ -29,9 +29,12 @@ describe("Image Generation", function () {
     const MockUSDC = await ethers.getContractFactory("MockUSDC");
     const usdc = await MockUSDC.deploy();
 
-    // Deploy core (AgenticCommerce)
-    const Core = await ethers.getContractFactory("AgenticCommerce");
-    const core = await upgrades.deployProxy(Core, [deployer.address], { kind: 'uups' });
+    // Deploy core (ERC8183)
+    const Core = await ethers.getContractFactory("ERC8183");
+    const core = await upgrades.deployProxy(Core, [deployer.address, deployer.address], { kind: 'uups' });
+
+    // Allowlist USDC as a payment token (admin action)
+    await core.connect(deployer).setPaymentTokenAllowed(await usdc.getAddress(), true);
 
     // Mint USDC to client
     await usdc.mint(client.address, TWENTY_USDC);
@@ -58,6 +61,9 @@ describe("Image Generation", function () {
 
     const TWENTY_USDC_AMT = TWENTY_USDC;
     const ONE_CBBTC = 100_000_000n; // 1 cbBTC (8 decimals)
+
+    // Allowlist cbBTC as a payment token
+    await core.connect(deployer).setPaymentTokenAllowed(cbbtcAddr, true);
 
     // Mint cbBTC to client and approve
     await cbbtc.mint(client.address, ONE_CBBTC);
@@ -272,6 +278,80 @@ describe("Image Generation", function () {
     await core.claimRefund(jobId);
     expect((await core.getJob(jobId)).status).to.equal(5n); // Expired
     expect(await usdc.balanceOf(client.address)).to.equal(TWENTY_USDC);
+  });
+
+  it("setBudget: reverts with PaymentTokenNotAllowed when token is not on allowlist", async function () {
+    const { core, client, provider, evaluator } = await loadFixture(deployFixture);
+
+    // Deploy a separate ERC-20 that we deliberately do NOT allowlist
+    const MockCBBTC = await ethers.getContractFactory("MockCBBTC");
+    const notAllowed = await MockCBBTC.deploy();
+
+    const expiry = (await time.latest()) + 3600;
+    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "test", ethers.ZeroAddress, 0);
+    const jobId = 1n;
+
+    await expect(
+      core.connect(provider).setBudget(jobId, await notAllowed.getAddress(), 1n, "0x")
+    ).to.be.revertedWithCustomError(core, "PaymentTokenNotAllowed");
+  });
+
+  it("setPaymentTokenAllowed: only admin, emits event, ZeroAddress reverts", async function () {
+    const { core, deployer, client } = await loadFixture(deployFixture);
+
+    const MockCBBTC = await ethers.getContractFactory("MockCBBTC");
+    const tok = await MockCBBTC.deploy();
+    const tokAddr = await tok.getAddress();
+
+    // Non-admin reverts with AccessControl error
+    await expect(
+      core.connect(client).setPaymentTokenAllowed(tokAddr, true)
+    ).to.be.reverted;
+
+    // ZeroAddress reverts
+    await expect(
+      core.connect(deployer).setPaymentTokenAllowed(ethers.ZeroAddress, true)
+    ).to.be.revertedWithCustomError(core, "ZeroAddress");
+
+    // Admin can allow and revoke, both emit event
+    await expect(core.connect(deployer).setPaymentTokenAllowed(tokAddr, true))
+      .to.emit(core, "PaymentTokenAllowlistUpdated")
+      .withArgs(tokAddr, true);
+    expect(await core.allowedPaymentTokens(tokAddr)).to.equal(true);
+
+    await expect(core.connect(deployer).setPaymentTokenAllowed(tokAddr, false))
+      .to.emit(core, "PaymentTokenAllowlistUpdated")
+      .withArgs(tokAddr, false);
+    expect(await core.allowedPaymentTokens(tokAddr)).to.equal(false);
+  });
+
+  it("fund: reverts with UnexpectedFundedAmount for fee-on-transfer tokens", async function () {
+    const { core, deployer, client, provider, evaluator } = await loadFixture(deployFixture);
+
+    const MockFOT = await ethers.getContractFactory("MockFeeOnTransferToken");
+    const fot = await MockFOT.deploy();
+    const fotAddr = await fot.getAddress();
+    const coreAddr = await core.getAddress();
+
+    const AMOUNT = 1_000_000n;
+    await fot.mint(client.address, AMOUNT);
+    await fot.connect(client).approve(coreAddr, AMOUNT);
+    await core.connect(deployer).setPaymentTokenAllowed(fotAddr, true);
+
+    const expiry = (await time.latest()) + 3600;
+    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "fot", ethers.ZeroAddress, 0);
+    const jobId = 1n;
+
+    // setBudget passes (interface probe + allowlist OK)
+    await core.connect(provider).setBudget(jobId, fotAddr, AMOUNT, "0x");
+
+    // fund must revert because received < budget (fee burned 1%)
+    await expect(
+      core.connect(client).fund(jobId, AMOUNT, "0x")
+    ).to.be.revertedWithCustomError(core, "UnexpectedFundedAmount");
+
+    // Escrow stayed empty; client keeps the post-fee remainder
+    expect(await fot.balanceOf(coreAddr)).to.equal(0n);
   });
 
   it("claimRefund: no grace period for Funded (not Submitted) jobs", async function () {

@@ -9,7 +9,7 @@ import "@openzeppelin/contracts/utils/introspection/IERC165.sol";
  *      callbacks on core job functions.
  *
  *      The `selector` identifies which core function is being called (e.g.
- *      AgenticCommerce.fund.selector). The `data` parameter contains
+ *      ERC8183.fund.selector). The `data` parameter contains
  *      function-specific parameters encoded as bytes (see documentation for
  *      encoding per selector).
  *
