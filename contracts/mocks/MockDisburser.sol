@@ -45,7 +45,7 @@ contract MockDisburser is IDisburser, ERC165 {
     }
 }
 
-/// @notice A contract that does NOT advertise IDisburser via ERC-165 — used to test rejection path.
+/// @notice A contract that does NOT advertise IDisburser via ERC-165 — used to test plain receiver behavior.
 contract NotADisburser {
     function answer() external pure returns (uint256) {
         return 42;

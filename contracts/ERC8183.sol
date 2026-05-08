@@ -152,10 +152,10 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     event JobExpired(
         uint256 indexed jobId
     );
-    /// @notice Emitted when the provider's net payment is released on completion
+    /// @notice Emitted when the provider-side net payment is released on completion
     event PaymentReleased(
         uint256 indexed jobId,
-        address indexed provider,
+        address indexed recipient,
         uint256 amount
     );
     /// @notice Emitted when the platform fee gets distributed on completion
@@ -237,9 +237,6 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     error PaymentTokenNotAllowed();
     /// @notice Thrown when funded amount received differs from expected (fee-on-transfer / rebasing tokens)
     error UnexpectedFundedAmount();
-    /// @notice Thrown when a payout receiver contract does not advertise IDisburser via ERC-165
-    error InvalidPayoutReceiver();
-
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
@@ -388,17 +385,13 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
 
     // ──────────────────── Job Lifecycle ────────────────────
 
-    /// @dev If `receiver` is a contract, require ERC-165 advertised IDisburser support.
-    ///      EOAs and address(0) pass without checks.
-    function _validatePayoutReceiver(address receiver) internal view {
-        if (receiver == address(0)) return;
-        if (receiver.code.length == 0) return;
-        if (
-            !ERC165Checker.supportsInterface(
-                receiver,
-                type(IDisburser).interfaceId
-            )
-        ) revert InvalidPayoutReceiver();
+    /// @dev Only receivers with deployed code can receive the optional callback.
+    ///      EOAs and contracts that do not advertise IDisburser are plain recipients.
+    function _isDisburser(address receiver) internal view returns (bool) {
+        return receiver.code.length > 0 && ERC165Checker.supportsInterface(
+            receiver,
+            type(IDisburser).interfaceId
+        );
     }
 
     /// @notice Creates a new job. Client is msg.sender.
@@ -408,7 +401,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     /// @param description Human-readable job description
     /// @param hook Hook contract address (address(0) = no hook, must be whitelisted)
     /// @param payoutReceiver Provider-side payout receiver (address(0) = pay provider directly).
-    ///        Contracts must advertise IDisburser via ERC-165; EOAs are accepted as plain recipients.
+    ///        Receivers advertising IDisburser via ERC-165 receive an onDisbursement callback.
     /// @param providerAgentId Optional ERC-8004 agent identity for provider
     /// @return The new job ID
     function createJob(
@@ -433,8 +426,6 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
                 )
             ) revert InvalidHook();
         }
-        _validatePayoutReceiver(payoutReceiver);
-
         uint256 jobId = ++jobCounter;
         jobs[jobId] = Job({
             client: msg.sender,
@@ -475,7 +466,6 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
         if (msg.sender != job.provider) revert Unauthorized();
-        _validatePayoutReceiver(payoutReceiver);
         job.payoutReceiver = payoutReceiver;
         emit PayoutReceiverSet(jobId, payoutReceiver);
     }
@@ -627,7 +617,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
             address recipient = job.payoutReceiver == address(0) ? job.provider : job.payoutReceiver;
             token.safeTransfer(recipient, net);
             emit PaymentReleased(jobId, recipient, net);
-            if (job.payoutReceiver != address(0)) {
+            if (job.payoutReceiver != address(0) && _isDisburser(job.payoutReceiver)) {
                 IDisburser(job.payoutReceiver).onDisbursement(
                     jobId,
                     msg.sig,

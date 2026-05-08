@@ -18,6 +18,7 @@ coverage.json
 # IDE
 .idea/
 .vscode/
+.obsidian/
 *.swp
 *.swo
 

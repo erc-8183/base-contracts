@@ -87,13 +87,12 @@ sequenceDiagram
 
 ## Sequence — Job with Payout Receiver
 
-`payoutReceiver` decouples the operational provider from the wallet that actually receives the provider-side net payout. Use it to route payouts to a treasury, multisig, or a splitter contract that performs custom downstream disbursement (e.g. when ACP platform/evaluator fees are set to zero and all fee logic lives downstream).
+`payoutReceiver` separates provider authorization from provider-side payout custody. If unset, ACP pays the provider. If set, ACP pays the receiver.
 
-- The receiver **must be a contract that advertises `IDisburser` via ERC-165**. EOAs and contracts that don't implement the interface are rejected at `createJob` / `setPayoutReceiver`.
-- Set initially by the client at `createJob`. The **provider** can update it via `setPayoutReceiver` while the job is `Open`; once `Funded` the receiver is locked.
-- When `payoutReceiver == address(0)` (default), behavior is unchanged: ACP pays the provider directly and no callback fires.
-- When `payoutReceiver != address(0)`, ACP transfers the provider-side net to the receiver and **strictly** invokes `onDisbursement(jobId, msg.sig, token, amount, optParams)`. A revert in the receiver propagates and rolls back the entire `complete` call.
-- Refunds (`reject`, `claimRefund`) and platform/evaluator fee routing are unaffected.
+- Receivers can be EOAs, smart accounts, or contracts.
+- Contracts advertising `IDisburser` via ERC-165 receive `onDisbursement` after payout.
+- The provider can update the receiver while the job is `Open`; it is locked once `Funded`.
+- Refunds and platform/evaluator fee routing are unchanged.
 
 ```mermaid
 sequenceDiagram
@@ -101,10 +100,10 @@ sequenceDiagram
     participant AC as ERC8183
     participant P as Provider
     participant E as Evaluator
-    participant R as PayoutReceiver (IDisburser)
+    participant R as PayoutReceiver
 
     C->>AC: createJob(..., hook, receiver, agentId)
-    Note over AC: receiver validated via ERC-165
+    Note over AC: receiver stored, callback support checked at payout
     P->>AC: setBudget(jobId, token, amount, "0x")
     P->>AC: setPayoutReceiver(jobId, newReceiver)
     Note over AC: provider-only, Open only —<br/>locked once Funded
@@ -117,9 +116,13 @@ sequenceDiagram
     E->>AC: complete(jobId, reason, optParams)
     Note over AC: 💸 platform fee → treasury<br/>💸 evaluator fee → evaluator
     AC->>R: transfer(net) [ERC-20]
-    AC->>R: onDisbursement(jobId, complete.selector, token, net, optParams)
-    Note over R: CAN revert → rolls back complete
+    alt Receiver advertises IDisburser
+        AC->>R: onDisbursement(jobId, complete.selector, token, net, optParams)
+        Note over R: CAN revert → rolls back complete
+    else EOA or plain receiver contract
+        Note over R: No callback
+    end
     Note over AC: Status: Completed
 ```
 
-`onDisbursement` is invoked **after** the ERC-20 transfer settles, so the receiver already controls the funds when its callback runs. This lets a splitter contract forward funds it already holds rather than pulling via `transferFrom`, removing the allowance-management overhead a hook-based splitter would require.
+When supported, `onDisbursement` runs after the ERC-20 transfer, so receiver contracts can split funds they already control without `transferFrom` allowances.

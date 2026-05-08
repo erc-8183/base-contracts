@@ -435,31 +435,48 @@ describe("Image Generation", function () {
       expect(await disburser.lastData()).to.equal("0xdeadbeef");
     });
 
-    it("createJob: contract not advertising IDisburser via ERC-165 reverts", async function () {
-      const { core, client, provider, evaluator } = await loadFixture(deployFixture);
-      const NotADisburser = await ethers.getContractFactory("NotADisburser");
-      const bad = await NotADisburser.deploy();
-      const expiry = (await time.latest()) + 3600;
+    it("createJob: EOA receiver receives funds without onDisbursement callback", async function () {
+      const { usdc, core, client, provider, evaluator } = await loadFixture(deployFixture);
+      const [, , , , payoutReceiver] = await ethers.getSigners();
 
-      await expect(
-        core.connect(client).createJob(
-          provider.address,
-          evaluator.address,
-          expiry,
-          "bad receiver",
-          ethers.ZeroAddress,
-          await bad.getAddress(),
-          0
-        )
-      ).to.be.revertedWithCustomError(core, "InvalidPayoutReceiver");
+      const { jobId } = await runJobToSubmitted({
+        core, usdc, client, provider, evaluator, payoutReceiver: payoutReceiver.address,
+      });
+
+      const completeTx = core.connect(evaluator).complete(jobId, ethers.encodeBytes32String("ok"), "0x");
+      await expect(completeTx)
+        .to.emit(core, "PaymentReleased")
+        .withArgs(jobId, payoutReceiver.address, TWENTY_USDC);
+      await expect(completeTx).to.not.emit(core, "Disbursed");
+
+      expect(await usdc.balanceOf(payoutReceiver.address)).to.equal(TWENTY_USDC);
     });
 
-    it("setPayoutReceiver: provider-only, Open-only, validates ERC-165, locks after fund", async function () {
+    it("createJob: non-IDisburser contract receiver receives funds without callback", async function () {
+      const { usdc, core, client, provider, evaluator } = await loadFixture(deployFixture);
+      const NotADisburser = await ethers.getContractFactory("NotADisburser");
+      const receiver = await NotADisburser.deploy();
+      const receiverAddr = await receiver.getAddress();
+
+      const { jobId } = await runJobToSubmitted({
+        core, usdc, client, provider, evaluator, payoutReceiver: receiverAddr,
+      });
+
+      const completeTx = core.connect(evaluator).complete(jobId, ethers.encodeBytes32String("ok"), "0x");
+      await expect(completeTx)
+        .to.emit(core, "PaymentReleased")
+        .withArgs(jobId, receiverAddr, TWENTY_USDC);
+      await expect(completeTx).to.not.emit(core, "Disbursed");
+
+      expect(await usdc.balanceOf(receiverAddr)).to.equal(TWENTY_USDC);
+    });
+
+    it("setPayoutReceiver: provider-only, Open-only, accepts non-IDisburser contracts, locks after fund", async function () {
       const { usdc, core, client, provider, evaluator } = await loadFixture(deployFixture);
       const Disburser = await ethers.getContractFactory("MockDisburser");
       const disburser = await Disburser.deploy();
       const NotADisburser = await ethers.getContractFactory("NotADisburser");
-      const bad = await NotADisburser.deploy();
+      const plainReceiver = await NotADisburser.deploy();
       const expiry = (await time.latest()) + 3600;
       const usdcAddr = await usdc.getAddress();
 
@@ -479,10 +496,10 @@ describe("Image Generation", function () {
         core.connect(client).setPayoutReceiver(jobId, await disburser.getAddress())
       ).to.be.revertedWithCustomError(core, "Unauthorized");
 
-      // ERC-165 validation rejects non-IDisburser contracts
-      await expect(
-        core.connect(provider).setPayoutReceiver(jobId, await bad.getAddress())
-      ).to.be.revertedWithCustomError(core, "InvalidPayoutReceiver");
+      // Non-IDisburser contracts are valid plain payout receivers.
+      await expect(core.connect(provider).setPayoutReceiver(jobId, await plainReceiver.getAddress()))
+        .to.emit(core, "PayoutReceiverSet")
+        .withArgs(jobId, await plainReceiver.getAddress());
 
       // Provider sets receiver while Open
       await expect(core.connect(provider).setPayoutReceiver(jobId, await disburser.getAddress()))
