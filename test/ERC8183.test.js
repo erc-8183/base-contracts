@@ -21,6 +21,9 @@ const {
  */
 describe("Image Generation", function () {
   const TWENTY_USDC = 20_000_000n; // 20 USDC (6 decimals)
+  const TEN_USDC = 10_000_000n;
+  const FIVE_USDC = 5_000_000n;
+  const ONE_USDC = 1_000_000n;
 
   async function deployFixture() {
     const [deployer, client, provider, evaluator] = await ethers.getSigners();
@@ -45,6 +48,38 @@ describe("Image Generation", function () {
       .approve(await core.getAddress(), TWENTY_USDC);
 
     return { usdc, core, deployer, client, provider, evaluator };
+  }
+
+  async function createFundedJob({ core, usdc, client, provider, evaluator, amount = TWENTY_USDC }) {
+    const expiry = (await time.latest()) + 3600;
+    const usdcAddr = await usdc.getAddress();
+
+    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "partial settlement job", ethers.ZeroAddress, 0);
+    const jobId = 1n;
+    await core.connect(provider).setBudget(jobId, usdcAddr, amount, "0x");
+    await core.connect(client).fund(jobId, amount, "0x");
+
+    return { jobId, expiry };
+  }
+
+  async function signVoucher({ core, signer, jobId, cumulativeAmount, optParams = "0x" }) {
+    const { chainId } = await ethers.provider.getNetwork();
+    return signer.signTypedData(
+      {
+        name: "ERC8183",
+        version: "1",
+        chainId,
+        verifyingContract: await core.getAddress(),
+      },
+      {
+        Voucher: [
+          { name: "jobId", type: "uint256" },
+          { name: "cumulativeAmount", type: "uint256" },
+          { name: "optParams", type: "bytes" },
+        ],
+      },
+      { jobId, cumulativeAmount, optParams }
+    );
   }
 
   it("e2e: two jobs on the same contract using different tokens (USDC and cbBTC)", async function () {
@@ -372,5 +407,172 @@ describe("Image Generation", function () {
     await core.claimRefund(jobId);
     expect((await core.getJob(jobId)).status).to.equal(5n); // Expired
     expect(await usdc.balanceOf(client.address)).to.equal(TWENTY_USDC);
+  });
+
+  it("settle: charges platform and evaluator fees on each settlement delta", async function () {
+    const { usdc, core, deployer, client, provider, evaluator } =
+      await loadFixture(deployFixture);
+    const coreAddr = await core.getAddress();
+
+    await core.connect(deployer).setPlatformFee(1000, deployer.address);
+    await core.connect(deployer).setEvaluatorFee(500);
+
+    const { jobId } = await createFundedJob({ core, usdc, client, provider, evaluator });
+    const voucherSig = await signVoucher({
+      core,
+      signer: client,
+      jobId,
+      cumulativeAmount: TEN_USDC,
+    });
+
+    await expect(core.connect(provider).settle(jobId, TEN_USDC, voucherSig, "0x"))
+      .to.emit(core, "Settled")
+      .withArgs(jobId, TEN_USDC, TEN_USDC)
+      .to.emit(core, "PlatformFeePaid")
+      .withArgs(jobId, deployer.address, ONE_USDC)
+      .to.emit(core, "EvaluatorFeePaid")
+      .withArgs(jobId, evaluator.address, 500_000n)
+      .to.emit(core, "PaymentReleased")
+      .withArgs(jobId, provider.address, 8_500_000n);
+
+    expect((await core.getJob(jobId)).settledAmount).to.equal(TEN_USDC);
+    expect(await usdc.balanceOf(deployer.address)).to.equal(ONE_USDC);
+    expect(await usdc.balanceOf(evaluator.address)).to.equal(500_000n);
+    expect(await usdc.balanceOf(provider.address)).to.equal(8_500_000n);
+    expect(await usdc.balanceOf(coreAddr)).to.equal(TEN_USDC);
+  });
+
+  it("settle: only pays the new delta for increasing cumulative vouchers", async function () {
+    const { usdc, core, deployer, client, provider, evaluator } =
+      await loadFixture(deployFixture);
+    const coreAddr = await core.getAddress();
+
+    await core.connect(deployer).setPlatformFee(1000, deployer.address);
+    await core.connect(deployer).setEvaluatorFee(500);
+
+    const { jobId } = await createFundedJob({ core, usdc, client, provider, evaluator });
+    const firstSig = await signVoucher({
+      core,
+      signer: client,
+      jobId,
+      cumulativeAmount: FIVE_USDC,
+    });
+    const secondSig = await signVoucher({
+      core,
+      signer: client,
+      jobId,
+      cumulativeAmount: TEN_USDC,
+    });
+
+    await core.connect(provider).settle(jobId, FIVE_USDC, firstSig, "0x");
+
+    await expect(core.connect(provider).settle(jobId, TEN_USDC, secondSig, "0x"))
+      .to.emit(core, "Settled")
+      .withArgs(jobId, TEN_USDC, FIVE_USDC)
+      .to.emit(core, "PlatformFeePaid")
+      .withArgs(jobId, deployer.address, 500_000n)
+      .to.emit(core, "EvaluatorFeePaid")
+      .withArgs(jobId, evaluator.address, 250_000n)
+      .to.emit(core, "PaymentReleased")
+      .withArgs(jobId, provider.address, 4_250_000n);
+
+    expect((await core.getJob(jobId)).settledAmount).to.equal(TEN_USDC);
+    expect(await usdc.balanceOf(deployer.address)).to.equal(ONE_USDC);
+    expect(await usdc.balanceOf(evaluator.address)).to.equal(500_000n);
+    expect(await usdc.balanceOf(provider.address)).to.equal(8_500_000n);
+    expect(await usdc.balanceOf(coreAddr)).to.equal(TEN_USDC);
+  });
+
+  it("settle: rejects stale cumulative amounts and invalid signatures", async function () {
+    const { usdc, core, client, provider, evaluator } =
+      await loadFixture(deployFixture);
+
+    const { jobId } = await createFundedJob({ core, usdc, client, provider, evaluator });
+    const firstSig = await signVoucher({
+      core,
+      signer: client,
+      jobId,
+      cumulativeAmount: FIVE_USDC,
+    });
+    await core.connect(provider).settle(jobId, FIVE_USDC, firstSig, "0x");
+
+    await expect(
+      core.connect(provider).settle(jobId, FIVE_USDC, firstSig, "0x")
+    ).to.be.revertedWithCustomError(core, "NoNewSettlement");
+
+    const providerSig = await signVoucher({
+      core,
+      signer: provider,
+      jobId,
+      cumulativeAmount: TEN_USDC,
+    });
+    await expect(
+      core.connect(provider).settle(jobId, TEN_USDC, providerSig, "0x")
+    ).to.be.revertedWithCustomError(core, "InvalidVoucherSignature");
+  });
+
+  it("complete: releases only unsettled escrow after partial settlement", async function () {
+    const { usdc, core, deployer, client, provider, evaluator } =
+      await loadFixture(deployFixture);
+    const coreAddr = await core.getAddress();
+
+    await core.connect(deployer).setPlatformFee(1000, deployer.address);
+    await core.connect(deployer).setEvaluatorFee(500);
+
+    const { jobId } = await createFundedJob({ core, usdc, client, provider, evaluator });
+    const voucherSig = await signVoucher({
+      core,
+      signer: client,
+      jobId,
+      cumulativeAmount: TEN_USDC,
+    });
+    await core.connect(provider).settle(jobId, TEN_USDC, voucherSig, "0x");
+    await core.connect(provider).submit(jobId, ethers.encodeBytes32String("work"), "0x");
+
+    await expect(core.connect(evaluator).complete(jobId, ethers.encodeBytes32String("ok"), "0x"))
+      .to.emit(core, "PaymentReleased")
+      .withArgs(jobId, provider.address, 8_500_000n);
+
+    expect(await usdc.balanceOf(deployer.address)).to.equal(2_000_000n);
+    expect(await usdc.balanceOf(evaluator.address)).to.equal(1_000_000n);
+    expect(await usdc.balanceOf(provider.address)).to.equal(17_000_000n);
+    expect(await usdc.balanceOf(coreAddr)).to.equal(0n);
+  });
+
+  it("reject and claimRefund: refund only unsettled escrow after partial settlement", async function () {
+    const { usdc, core, client, provider, evaluator } =
+      await loadFixture(deployFixture);
+
+    const first = await createFundedJob({ core, usdc, client, provider, evaluator });
+    const firstSig = await signVoucher({
+      core,
+      signer: client,
+      jobId: first.jobId,
+      cumulativeAmount: TEN_USDC,
+    });
+    await core.connect(provider).settle(first.jobId, TEN_USDC, firstSig, "0x");
+    await core.connect(evaluator).reject(first.jobId, ethers.encodeBytes32String("no"), "0x");
+    expect(await usdc.balanceOf(client.address)).to.equal(TEN_USDC);
+
+    await usdc.mint(client.address, TWENTY_USDC);
+    await usdc.connect(client).approve(await core.getAddress(), TWENTY_USDC);
+
+    const expiry = (await time.latest()) + 3600;
+    const usdcAddr = await usdc.getAddress();
+    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "partial refund job", ethers.ZeroAddress, 0);
+    const secondJobId = 2n;
+    await core.connect(provider).setBudget(secondJobId, usdcAddr, TWENTY_USDC, "0x");
+    await core.connect(client).fund(secondJobId, TWENTY_USDC, "0x");
+    const secondSig = await signVoucher({
+      core,
+      signer: client,
+      jobId: secondJobId,
+      cumulativeAmount: TEN_USDC,
+    });
+    await core.connect(provider).settle(secondJobId, TEN_USDC, secondSig, "0x");
+
+    await time.increaseTo(expiry + 1);
+    await core.claimRefund(secondJobId);
+    expect(await usdc.balanceOf(client.address)).to.equal(2n * TEN_USDC);
   });
 });

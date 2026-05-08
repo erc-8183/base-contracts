@@ -11,6 +11,8 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import "./IERC8183Hook.sol";
 import "@openzeppelin/contracts/utils/introspection/ERC165Checker.sol";
+import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
+import {EIP712Upgradeable} from "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
 
 /**
  * @title ERC8183
@@ -24,7 +26,7 @@ import "@openzeppelin/contracts/utils/introspection/ERC165Checker.sol";
  *
  *      When hook == address(0), the contract operates as a standalone job escrow.
  */
-contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable, ReentrancyGuardTransient, UUPSUpgradeable {
+contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable, ReentrancyGuardTransient, UUPSUpgradeable, EIP712Upgradeable {
     using SafeERC20 for IERC20;
 
     /// @notice Job lifecycle states
@@ -45,6 +47,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     /// @param evaluator        Third-party attestor
     /// @param submittedAt      Unix timestamp when provider submitted work
     /// @param budget           Escrowed payment amount in paymentToken units
+    /// @param settledAmount    Cumulative gross amount released via partial settlement vouchers
     /// @param hook             Hook contract for before/after callbacks (address(0) = no hook)
     /// @param paymentToken     ERC-20 token used for job payment
     /// @param providerAgentId  Optional ERC-8004 agent identity for provider
@@ -55,15 +58,25 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         address provider;           // 20 ──┐ slot 2
         uint48 expiredAt;           // 6  ──┘
         address evaluator;          // 20 ──┐ slot 3
-        uint48 submittedAt;         // 6  ──┘ 
+        uint48 submittedAt;         // 6  ──┘
         uint256 budget;             // 32 ──  slot 4
-        address hook;               // 20 ──  slot 5
-        address paymentToken;       // 20 ──  slot 6
-        uint256 providerAgentId;    // 32 ──  slot 7
-        string description;         //        slot 8+
+        uint256 settledAmount;      // 32 ──  slot 5
+        address hook;               // 20 ──  slot 6
+        address paymentToken;       // 20 ──  slot 7
+        uint256 providerAgentId;    // 32 ──  slot 8
+        string description;         //        slot 9+
     }
 
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
+    string public constant EIP712_NAME = "ERC8183";
+    string public constant EIP712_VERSION = "1";
+
+    /// @notice EIP-712 type hash for the partial-settlement Voucher struct.
+    /// @dev    chainId and verifyingContract are bound by the EIP-712 domain separator.
+    bytes32 public constant VOUCHER_TYPEHASH =
+        keccak256(
+            "Voucher(uint256 jobId,uint256 cumulativeAmount,bytes optParams)"
+        );
 
     /// @notice Grace period after expiry during which only the evaluator can finalize a Submitted job.
     ///         Prevents third-party censorship of providers who submitted work before expiry.
@@ -161,6 +174,12 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         address indexed client,
         uint256 amount
     );
+    /// @notice Emitted on each successful partial settlement
+    event Settled(
+        uint256 indexed jobId,
+        uint256 cumulativeAmount,
+        uint256 delta
+    );
     /// @notice Emitted when a hook's whitelist status changes
     event HookWhitelistUpdated(
         address indexed hook,
@@ -222,6 +241,12 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     error PaymentTokenNotAllowed();
     /// @notice Thrown when funded amount received differs from expected (fee-on-transfer / rebasing tokens)
     error UnexpectedFundedAmount();
+    /// @notice Thrown when a Voucher signature does not match the client
+    error InvalidVoucherSignature();
+    /// @notice Thrown when a settle voucher does not advance the cumulative amount
+    error NoNewSettlement();
+    /// @notice Thrown when cumulative settlement would exceed the job budget
+    error ExceedsBudget();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -233,6 +258,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         if (treasury_ == address(0) || admin_ == address(0)) revert ZeroAddress();
         __AccessControl_init();
         __Pausable_init();
+        __EIP712_init(EIP712_NAME, EIP712_VERSION);
         platformTreasury = treasury_;
         _grantRole(DEFAULT_ADMIN_ROLE, admin_);
         _grantRole(ADMIN_ROLE, admin_);
@@ -410,6 +436,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
             evaluator: evaluator,
             submittedAt: 0,
             budget: 0,
+            settledAmount: 0,
             hook: hook,
             paymentToken: address(0),
             providerAgentId: provider != address(0) ? providerAgentId : 0,
@@ -557,7 +584,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
 
         job.status = JobStatus.Completed;
 
-        uint256 amount = job.budget;
+        uint256 amount = job.budget - job.settledAmount;
         uint256 platformFee = (amount * platformFeeBP) / 10000;
         uint256 evalFee = (amount * evaluatorFeeBP) / 10000;
         uint256 net = amount - platformFee - evalFee;
@@ -612,12 +639,13 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         JobStatus prev = job.status;
         job.status = JobStatus.Rejected;
 
+        uint256 refundAmount = job.budget - job.settledAmount;
         if (
             (prev == JobStatus.Funded || prev == JobStatus.Submitted) &&
-            job.budget > 0
+            refundAmount > 0
         ) {
-            IERC20(job.paymentToken).safeTransfer(job.client, job.budget);
-            emit Refunded(jobId, job.client, job.budget);
+            IERC20(job.paymentToken).safeTransfer(job.client, refundAmount);
+            emit Refunded(jobId, job.client, refundAmount);
         }
 
         emit JobRejected(jobId, msg.sender, reason);
@@ -643,12 +671,101 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         JobStatus prev = job.status;
         job.status = JobStatus.Expired;
 
-        if (job.budget > 0 && (prev == JobStatus.Funded || prev == JobStatus.Submitted)) {
-            IERC20(job.paymentToken).safeTransfer(job.client, job.budget);
-            emit Refunded(jobId, job.client, job.budget);
+        uint256 refundAmount = job.budget - job.settledAmount;
+        if (refundAmount > 0 && (prev == JobStatus.Funded || prev == JobStatus.Submitted)) {
+            IERC20(job.paymentToken).safeTransfer(job.client, refundAmount);
+            emit Refunded(jobId, job.client, refundAmount);
         }
 
         emit JobExpired(jobId);
+    }
+
+    // ──────────────────── Partial Settlement ────────────────────
+
+    /// @dev Verifies an EIP-712 Voucher signature against the expected signer (client).
+    function _verifyVoucher(
+        uint256 jobId,
+        uint256 cumulativeAmount,
+        address expectedSigner,
+        bytes calldata optParams,
+        bytes calldata sig
+    ) internal view {
+        // Client signs over optParams to bind hook actions for partial settlement.
+        bytes32 structHash = keccak256(
+            abi.encode(
+                VOUCHER_TYPEHASH,
+                jobId,
+                cumulativeAmount,
+                keccak256(optParams)
+            )
+        );
+        bytes32 digest = _hashTypedDataV4(structHash);
+        if (
+            !SignatureChecker.isValidSignatureNowCalldata(
+                expectedSigner,
+                digest,
+                sig
+            )
+        ) revert InvalidVoucherSignature();
+    }
+
+    /// @notice Voucher-based partial settlement (Provider only).
+    /// @dev    Verifies an EIP-712 Voucher signed by the client and releases only the new delta.
+    ///         Incremental — does not close the job. Job remains Funded or Submitted.
+    /// @param jobId            The job to settle
+    /// @param cumulativeAmount Monotonically increasing cumulative gross amount
+    /// @param voucherSig       EIP-712 Voucher signature from the client
+    /// @param optParams        Hook-specific parameters, also bound into the voucher digest
+    function settle(
+        uint256 jobId,
+        uint256 cumulativeAmount,
+        bytes calldata voucherSig,
+        bytes calldata optParams
+    ) external whenNotPaused nonReentrant {
+        Job storage job = jobs[jobId];
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
+        if (msg.sender != job.provider) revert Unauthorized();
+        if (
+            job.status != JobStatus.Funded && job.status != JobStatus.Submitted
+        ) revert WrongStatus();
+        if (block.timestamp >= job.expiredAt) revert WrongStatus();
+        if (cumulativeAmount <= job.settledAmount) revert NoNewSettlement();
+        if (cumulativeAmount > job.budget) revert ExceedsBudget();
+
+        _verifyVoucher(
+            jobId,
+            cumulativeAmount,
+            job.client,
+            optParams,
+            voucherSig
+        );
+
+        uint256 delta = cumulativeAmount - job.settledAmount;
+        bytes memory data = abi.encode(msg.sender, delta, optParams);
+        _beforeHook(job.hook, jobId, msg.sig, data);
+
+        job.settledAmount = cumulativeAmount;
+        uint256 platformFee = (delta * platformFeeBP) / 10000;
+        uint256 evalFee = (delta * evaluatorFeeBP) / 10000;
+        uint256 net = delta - platformFee - evalFee;
+
+        IERC20 token = IERC20(job.paymentToken);
+        if (platformFee > 0) {
+            token.safeTransfer(platformTreasury, platformFee);
+            emit PlatformFeePaid(jobId, platformTreasury, platformFee);
+        }
+        if (evalFee > 0) {
+            token.safeTransfer(job.evaluator, evalFee);
+            emit EvaluatorFeePaid(jobId, job.evaluator, evalFee);
+        }
+        if (net > 0) {
+            token.safeTransfer(job.provider, net);
+        }
+        emit PaymentReleased(jobId, job.provider, net);
+
+        emit Settled(jobId, cumulativeAmount, delta);
+
+        _afterHook(job.hook, jobId, msg.sig, data);
     }
 
     // ──────────────────── View ────────────────────
