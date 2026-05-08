@@ -73,14 +73,14 @@ describe("Image Generation", function () {
     const hookAddr = ethers.ZeroAddress;
 
     // Job 1: paid in USDC
-    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "Job paid in USDC", hookAddr, 0);
+    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "Job paid in USDC", hookAddr, ethers.ZeroAddress, 0);
     const jobId1 = 1n;
 
     await core.connect(provider).setBudget(jobId1, usdcAddr, TWENTY_USDC_AMT, "0x");
     expect((await core.getJob(jobId1)).paymentToken).to.equal(usdcAddr);
 
     // Job 2: paid in cbBTC
-    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "Job paid in cbBTC", hookAddr, 0);
+    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "Job paid in cbBTC", hookAddr, ethers.ZeroAddress, 0);
     const jobId2 = 2n;
 
     await core.connect(provider).setBudget(jobId2, cbbtcAddr, ONE_CBBTC, "0x");
@@ -117,12 +117,12 @@ describe("Image Generation", function () {
     const AGENT_ID = 42n;
 
     // createJob with agentId when provider is known
-    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "Job with agentId", hookAddr, AGENT_ID);
+    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "Job with agentId", hookAddr, ethers.ZeroAddress, AGENT_ID);
     const jobId1 = 1n;
     expect((await core.getJob(jobId1)).providerAgentId).to.equal(AGENT_ID);
 
     // createJob without provider, then setProvider with agentId
-    await core.connect(client).createJob(ethers.ZeroAddress, evaluator.address, expiry, "Job without provider", hookAddr, 99);
+    await core.connect(client).createJob(ethers.ZeroAddress, evaluator.address, expiry, "Job without provider", hookAddr, ethers.ZeroAddress, 99);
     const jobId2 = 2n;
     // agentId should be 0 when provider is zero at creation
     expect((await core.getJob(jobId2)).providerAgentId).to.equal(0n);
@@ -135,7 +135,7 @@ describe("Image Generation", function () {
     expect((await core.getJob(jobId2)).providerAgentId).to.equal(AGENT_ID_2);
 
     // agentId = 0 is valid (no ERC-8004 identity)
-    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "No agentId", hookAddr, 0);
+    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "No agentId", hookAddr, ethers.ZeroAddress, 0);
     const jobId3 = 3n;
     expect((await core.getJob(jobId3)).providerAgentId).to.equal(0n);
   });
@@ -160,6 +160,7 @@ describe("Image Generation", function () {
         expiry,
         "Generate a beautiful landscape wallpaper image",
         hookAddr,
+        ethers.ZeroAddress, // no payout receiver
         0 // no ERC-8004 agentId
       );
 
@@ -237,7 +238,7 @@ describe("Image Generation", function () {
     const usdcAddr = await usdc.getAddress();
     const expiry = (await time.latest()) + 3600;
 
-    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "grace period test", ethers.ZeroAddress, 0);
+    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "grace period test", ethers.ZeroAddress, ethers.ZeroAddress, 0);
     const jobId = 1n;
 
     await core.connect(provider).setBudget(jobId, usdcAddr, TWENTY_USDC, "0x");
@@ -266,7 +267,7 @@ describe("Image Generation", function () {
     const usdcAddr = await usdc.getAddress();
     const expiry = (await time.latest()) + 3600;
 
-    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "grace expiry test", ethers.ZeroAddress, 0);
+    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "grace expiry test", ethers.ZeroAddress, ethers.ZeroAddress, 0);
     const jobId = 1n;
 
     await core.connect(provider).setBudget(jobId, usdcAddr, TWENTY_USDC, "0x");
@@ -288,7 +289,7 @@ describe("Image Generation", function () {
     const notAllowed = await MockCBBTC.deploy();
 
     const expiry = (await time.latest()) + 3600;
-    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "test", ethers.ZeroAddress, 0);
+    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "test", ethers.ZeroAddress, ethers.ZeroAddress, 0);
     const jobId = 1n;
 
     await expect(
@@ -339,7 +340,7 @@ describe("Image Generation", function () {
     await core.connect(deployer).setPaymentTokenAllowed(fotAddr, true);
 
     const expiry = (await time.latest()) + 3600;
-    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "fot", ethers.ZeroAddress, 0);
+    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "fot", ethers.ZeroAddress, ethers.ZeroAddress, 0);
     const jobId = 1n;
 
     // setBudget passes (interface probe + allowlist OK)
@@ -361,7 +362,7 @@ describe("Image Generation", function () {
     const usdcAddr = await usdc.getAddress();
     const expiry = (await time.latest()) + 3600;
 
-    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "no grace test", ethers.ZeroAddress, 0);
+    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "no grace test", ethers.ZeroAddress, ethers.ZeroAddress, 0);
     const jobId = 1n;
 
     await core.connect(provider).setBudget(jobId, usdcAddr, TWENTY_USDC, "0x");
@@ -372,5 +373,168 @@ describe("Image Generation", function () {
     await core.claimRefund(jobId);
     expect((await core.getJob(jobId)).status).to.equal(5n); // Expired
     expect(await usdc.balanceOf(client.address)).to.equal(TWENTY_USDC);
+  });
+
+  describe("payoutReceiver", function () {
+    async function runJobToSubmitted({ core, usdc, client, provider, evaluator, payoutReceiver }) {
+      const expiry = (await time.latest()) + 3600;
+      const usdcAddr = await usdc.getAddress();
+      await core.connect(client).createJob(
+        provider.address,
+        evaluator.address,
+        expiry,
+        "receiver job",
+        ethers.ZeroAddress,
+        payoutReceiver,
+        0
+      );
+      const jobId = 1n;
+      await core.connect(provider).setBudget(jobId, usdcAddr, TWENTY_USDC, "0x");
+      await core.connect(client).fund(jobId, TWENTY_USDC, "0x");
+      await core.connect(provider).submit(jobId, ethers.encodeBytes32String("done"), "0x");
+      return { jobId };
+    }
+
+    it("createJob: address(0) keeps existing pay-provider-directly behavior", async function () {
+      const { usdc, core, client, provider, evaluator } = await loadFixture(deployFixture);
+      const { jobId } = await runJobToSubmitted({ core, usdc, client, provider, evaluator, payoutReceiver: ethers.ZeroAddress });
+
+      expect((await core.getJob(jobId)).payoutReceiver).to.equal(ethers.ZeroAddress);
+
+      await expect(core.connect(evaluator).complete(jobId, ethers.encodeBytes32String("ok"), "0x"))
+        .to.emit(core, "PaymentReleased")
+        .withArgs(jobId, provider.address, TWENTY_USDC);
+      expect(await usdc.balanceOf(provider.address)).to.equal(TWENTY_USDC);
+    });
+
+    it("createJob: EOA receiver routes funds without disburser callback", async function () {
+      const { usdc, core, client, provider, evaluator } = await loadFixture(deployFixture);
+      const [, , , , eoaReceiver] = await ethers.getSigners();
+      const { jobId } = await runJobToSubmitted({
+        core, usdc, client, provider, evaluator, payoutReceiver: eoaReceiver.address,
+      });
+
+      expect((await core.getJob(jobId)).payoutReceiver).to.equal(eoaReceiver.address);
+
+      const tx = core.connect(evaluator).complete(jobId, ethers.encodeBytes32String("ok"), "0x");
+      await expect(tx)
+        .to.emit(core, "PaymentReleased")
+        .withArgs(jobId, eoaReceiver.address, TWENTY_USDC);
+      // No Disbursed event for EOA recipients
+      await expect(tx).to.not.emit(core, "Disbursed");
+      expect(await usdc.balanceOf(eoaReceiver.address)).to.equal(TWENTY_USDC);
+      expect(await usdc.balanceOf(provider.address)).to.equal(0n);
+    });
+
+    it("createJob: contract receiver receives funds and onDisbursement is invoked", async function () {
+      const { usdc, core, client, provider, evaluator } = await loadFixture(deployFixture);
+      const Disburser = await ethers.getContractFactory("MockDisburser");
+      const disburser = await Disburser.deploy();
+      const disburserAddr = await disburser.getAddress();
+      const usdcAddr = await usdc.getAddress();
+
+      const { jobId } = await runJobToSubmitted({
+        core, usdc, client, provider, evaluator, payoutReceiver: disburserAddr,
+      });
+
+      const completeSelector = core.interface.getFunction("complete").selector;
+
+      await expect(core.connect(evaluator).complete(jobId, ethers.encodeBytes32String("ok"), "0xdeadbeef"))
+        .to.emit(core, "PaymentReleased")
+        .withArgs(jobId, disburserAddr, TWENTY_USDC)
+        .to.emit(core, "Disbursed")
+        .withArgs(jobId, disburserAddr, completeSelector, TWENTY_USDC);
+
+      expect(await usdc.balanceOf(disburserAddr)).to.equal(TWENTY_USDC);
+      expect(await disburser.callCount()).to.equal(1n);
+      expect(await disburser.lastJobId()).to.equal(jobId);
+      expect(await disburser.lastSelector()).to.equal(completeSelector);
+      expect(await disburser.lastToken()).to.equal(usdcAddr);
+      expect(await disburser.lastAmount()).to.equal(TWENTY_USDC);
+      expect(await disburser.lastData()).to.equal("0xdeadbeef");
+    });
+
+    it("createJob: contract not advertising IDisburser via ERC-165 reverts", async function () {
+      const { core, client, provider, evaluator } = await loadFixture(deployFixture);
+      const NotADisburser = await ethers.getContractFactory("NotADisburser");
+      const bad = await NotADisburser.deploy();
+      const expiry = (await time.latest()) + 3600;
+
+      await expect(
+        core.connect(client).createJob(
+          provider.address,
+          evaluator.address,
+          expiry,
+          "bad receiver",
+          ethers.ZeroAddress,
+          await bad.getAddress(),
+          0
+        )
+      ).to.be.revertedWithCustomError(core, "InvalidPayoutReceiver");
+    });
+
+    it("setPayoutReceiver: client-only, Open-only, validates ERC-165, locks after fund", async function () {
+      const { usdc, core, client, provider, evaluator } = await loadFixture(deployFixture);
+      const Disburser = await ethers.getContractFactory("MockDisburser");
+      const disburser = await Disburser.deploy();
+      const NotADisburser = await ethers.getContractFactory("NotADisburser");
+      const bad = await NotADisburser.deploy();
+      const expiry = (await time.latest()) + 3600;
+      const usdcAddr = await usdc.getAddress();
+
+      await core.connect(client).createJob(
+        provider.address,
+        evaluator.address,
+        expiry,
+        "setter test",
+        ethers.ZeroAddress,
+        ethers.ZeroAddress,
+        0
+      );
+      const jobId = 1n;
+
+      // Non-client cannot set
+      await expect(
+        core.connect(provider).setPayoutReceiver(jobId, await disburser.getAddress())
+      ).to.be.revertedWithCustomError(core, "Unauthorized");
+
+      // ERC-165 validation rejects non-IDisburser contracts
+      await expect(
+        core.connect(client).setPayoutReceiver(jobId, await bad.getAddress())
+      ).to.be.revertedWithCustomError(core, "InvalidPayoutReceiver");
+
+      // Client sets receiver while Open
+      await expect(core.connect(client).setPayoutReceiver(jobId, await disburser.getAddress()))
+        .to.emit(core, "PayoutReceiverSet")
+        .withArgs(jobId, await disburser.getAddress());
+      expect((await core.getJob(jobId)).payoutReceiver).to.equal(await disburser.getAddress());
+
+      // Fund -> Open transitions to Funded; setter is now locked
+      await core.connect(provider).setBudget(jobId, usdcAddr, TWENTY_USDC, "0x");
+      await core.connect(client).fund(jobId, TWENTY_USDC, "0x");
+      await expect(
+        core.connect(client).setPayoutReceiver(jobId, ethers.ZeroAddress)
+      ).to.be.revertedWithCustomError(core, "WrongStatus");
+    });
+
+    it("complete: reverts when receiver disburser reverts (strict)", async function () {
+      const { usdc, core, client, provider, evaluator } = await loadFixture(deployFixture);
+      const Disburser = await ethers.getContractFactory("MockDisburser");
+      const disburser = await Disburser.deploy();
+
+      const { jobId } = await runJobToSubmitted({
+        core, usdc, client, provider, evaluator, payoutReceiver: await disburser.getAddress(),
+      });
+
+      await disburser.setShouldRevert(true);
+
+      await expect(
+        core.connect(evaluator).complete(jobId, ethers.encodeBytes32String("ok"), "0x")
+      ).to.be.revertedWith("MockDisburser: forced revert");
+
+      // Job still Submitted, escrow untouched
+      expect((await core.getJob(jobId)).status).to.equal(2n);
+      expect(await usdc.balanceOf(await core.getAddress())).to.equal(TWENTY_USDC);
+    });
   });
 });

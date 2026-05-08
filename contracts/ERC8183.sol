@@ -10,6 +10,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import "./IERC8183Hook.sol";
+import "./IDisburser.sol";
 import "@openzeppelin/contracts/utils/introspection/ERC165Checker.sol";
 
 /**
@@ -37,7 +38,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         Expired
     }
 
-    /// @notice Core job data, packed into 8 storage slots
+    /// @notice Core job data, packed into 9 storage slots
     /// @param client           Job creator who funds the escrow
     /// @param status           Current lifecycle state
     /// @param provider         Service provider who delivers work
@@ -47,6 +48,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     /// @param budget           Escrowed payment amount in paymentToken units
     /// @param hook             Hook contract for before/after callbacks (address(0) = no hook)
     /// @param paymentToken     ERC-20 token used for job payment
+    /// @param payoutReceiver   Provider-side payout receiver (address(0) = pay provider directly)
     /// @param providerAgentId  Optional ERC-8004 agent identity for provider
     /// @param description      Human-readable job description
     struct Job {
@@ -55,12 +57,13 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         address provider;           // 20 ──┐ slot 2
         uint48 expiredAt;           // 6  ──┘
         address evaluator;          // 20 ──┐ slot 3
-        uint48 submittedAt;         // 6  ──┘ 
+        uint48 submittedAt;         // 6  ──┘
         uint256 budget;             // 32 ──  slot 4
         address hook;               // 20 ──  slot 5
         address paymentToken;       // 20 ──  slot 6
-        uint256 providerAgentId;    // 32 ──  slot 7
-        string description;         //        slot 8+
+        address payoutReceiver;     // 20 ──  slot 7
+        uint256 providerAgentId;    // 32 ──  slot 8
+        string description;         //        slot 9+
     }
 
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
@@ -99,9 +102,21 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     );
     /// @notice Emitted when a provider is assigned to a job
     event ProviderSet(
-        uint256 indexed jobId, 
-        address indexed provider, 
+        uint256 indexed jobId,
+        address indexed provider,
         uint256 agentId
+    );
+    /// @notice Emitted when the payout receiver for a job is set or updated
+    event PayoutReceiverSet(
+        uint256 indexed jobId,
+        address indexed payoutReceiver
+    );
+    /// @notice Emitted when a payout is forwarded to a contract receiver and onDisbursement is invoked
+    event Disbursed(
+        uint256 indexed jobId,
+        address indexed receiver,
+        bytes4 selector,
+        uint256 amount
     );
     /// @notice Emitted when the provider sets or updates the job budget
     event BudgetSet(
@@ -222,6 +237,8 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     error PaymentTokenNotAllowed();
     /// @notice Thrown when funded amount received differs from expected (fee-on-transfer / rebasing tokens)
     error UnexpectedFundedAmount();
+    /// @notice Thrown when a payout receiver contract does not advertise IDisburser via ERC-165
+    error InvalidPayoutReceiver();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -371,12 +388,27 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
 
     // ──────────────────── Job Lifecycle ────────────────────
 
+    /// @dev If `receiver` is a contract, require ERC-165 advertised IDisburser support.
+    ///      EOAs and address(0) pass without checks.
+    function _validatePayoutReceiver(address receiver) internal view {
+        if (receiver == address(0)) return;
+        if (receiver.code.length == 0) return;
+        if (
+            !ERC165Checker.supportsInterface(
+                receiver,
+                type(IDisburser).interfaceId
+            )
+        ) revert InvalidPayoutReceiver();
+    }
+
     /// @notice Creates a new job. Client is msg.sender.
     //// @param provider Service provider (can be address(0) to assign later via setProvider)
     /// @param evaluator Third-party attestor (cannot be address(0))
     /// @param expiredAt Unix timestamp when the job expires (must be > 5 min from now)
     /// @param description Human-readable job description
     /// @param hook Hook contract address (address(0) = no hook, must be whitelisted)
+    /// @param payoutReceiver Provider-side payout receiver (address(0) = pay provider directly).
+    ///        Contracts must advertise IDisburser via ERC-165; EOAs are accepted as plain recipients.
     /// @param providerAgentId Optional ERC-8004 agent identity for provider
     /// @return The new job ID
     function createJob(
@@ -385,6 +417,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         uint48 expiredAt,
         string calldata description,
         address hook,
+        address payoutReceiver,
         uint256 providerAgentId
     ) external whenNotPaused nonReentrant returns (uint256) {
         if (expiredAt <= block.timestamp + 5 minutes) revert ExpiryTooShort();
@@ -400,6 +433,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
                 )
             ) revert InvalidHook();
         }
+        _validatePayoutReceiver(payoutReceiver);
 
         uint256 jobId = ++jobCounter;
         jobs[jobId] = Job({
@@ -412,6 +446,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
             budget: 0,
             hook: hook,
             paymentToken: address(0),
+            payoutReceiver: payoutReceiver,
             providerAgentId: provider != address(0) ? providerAgentId : 0,
             description: description
         });
@@ -424,8 +459,25 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
             expiredAt,
             hook
         );
+        if (payoutReceiver != address(0)) {
+            emit PayoutReceiverSet(jobId, payoutReceiver);
+        }
 
         return jobId;
+    }
+
+    /// @notice Client updates the payout receiver while the job is still Open.
+    ///         Locked once the job is funded.
+    /// @param jobId The job to update
+    /// @param payoutReceiver New payout receiver (address(0) = pay provider directly)
+    function setPayoutReceiver(uint256 jobId, address payoutReceiver) external whenNotPaused {
+        Job storage job = jobs[jobId];
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
+        if (job.status != JobStatus.Open) revert WrongStatus();
+        if (msg.sender != job.client) revert Unauthorized();
+        _validatePayoutReceiver(payoutReceiver);
+        job.payoutReceiver = payoutReceiver;
+        emit PayoutReceiverSet(jobId, payoutReceiver);
     }
 
     /// @notice Assigns a provider to an Open job that has no provider yet. Client only.
@@ -572,8 +624,19 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
             emit EvaluatorFeePaid(jobId, job.evaluator, evalFee);
         }
         if (net > 0) {
-            token.safeTransfer(job.provider, net);
-            emit PaymentReleased(jobId, job.provider, net);
+            address recipient = job.payoutReceiver == address(0) ? job.provider : job.payoutReceiver;
+            token.safeTransfer(recipient, net);
+            emit PaymentReleased(jobId, recipient, net);
+            if (job.payoutReceiver != address(0) && job.payoutReceiver.code.length > 0) {
+                IDisburser(job.payoutReceiver).onDisbursement(
+                    jobId,
+                    msg.sig,
+                    job.paymentToken,
+                    net,
+                    optParams
+                );
+                emit Disbursed(jobId, job.payoutReceiver, msg.sig, net);
+            }
         }
 
         emit JobCompleted(jobId, job.evaluator, reason);
