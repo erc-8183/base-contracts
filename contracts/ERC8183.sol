@@ -474,7 +474,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         Job storage job = jobs[jobId];
         if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
-        if (msg.sender != job.client) revert Unauthorized();
+        if (msg.sender != job.provider) revert Unauthorized();
         _validatePayoutReceiver(payoutReceiver);
         job.payoutReceiver = payoutReceiver;
         emit PayoutReceiverSet(jobId, payoutReceiver);
@@ -627,7 +627,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
             address recipient = job.payoutReceiver == address(0) ? job.provider : job.payoutReceiver;
             token.safeTransfer(recipient, net);
             emit PaymentReleased(jobId, recipient, net);
-            if (job.payoutReceiver != address(0) && job.payoutReceiver.code.length > 0) {
+            if (job.payoutReceiver != address(0)) {
                 IDisburser(job.payoutReceiver).onDisbursement(
                     jobId,
                     msg.sig,

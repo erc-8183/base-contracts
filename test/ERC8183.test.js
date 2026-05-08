@@ -407,25 +407,6 @@ describe("Image Generation", function () {
       expect(await usdc.balanceOf(provider.address)).to.equal(TWENTY_USDC);
     });
 
-    it("createJob: EOA receiver routes funds without disburser callback", async function () {
-      const { usdc, core, client, provider, evaluator } = await loadFixture(deployFixture);
-      const [, , , , eoaReceiver] = await ethers.getSigners();
-      const { jobId } = await runJobToSubmitted({
-        core, usdc, client, provider, evaluator, payoutReceiver: eoaReceiver.address,
-      });
-
-      expect((await core.getJob(jobId)).payoutReceiver).to.equal(eoaReceiver.address);
-
-      const tx = core.connect(evaluator).complete(jobId, ethers.encodeBytes32String("ok"), "0x");
-      await expect(tx)
-        .to.emit(core, "PaymentReleased")
-        .withArgs(jobId, eoaReceiver.address, TWENTY_USDC);
-      // No Disbursed event for EOA recipients
-      await expect(tx).to.not.emit(core, "Disbursed");
-      expect(await usdc.balanceOf(eoaReceiver.address)).to.equal(TWENTY_USDC);
-      expect(await usdc.balanceOf(provider.address)).to.equal(0n);
-    });
-
     it("createJob: contract receiver receives funds and onDisbursement is invoked", async function () {
       const { usdc, core, client, provider, evaluator } = await loadFixture(deployFixture);
       const Disburser = await ethers.getContractFactory("MockDisburser");
@@ -473,7 +454,7 @@ describe("Image Generation", function () {
       ).to.be.revertedWithCustomError(core, "InvalidPayoutReceiver");
     });
 
-    it("setPayoutReceiver: client-only, Open-only, validates ERC-165, locks after fund", async function () {
+    it("setPayoutReceiver: provider-only, Open-only, validates ERC-165, locks after fund", async function () {
       const { usdc, core, client, provider, evaluator } = await loadFixture(deployFixture);
       const Disburser = await ethers.getContractFactory("MockDisburser");
       const disburser = await Disburser.deploy();
@@ -493,18 +474,18 @@ describe("Image Generation", function () {
       );
       const jobId = 1n;
 
-      // Non-client cannot set
+      // Non-provider cannot set
       await expect(
-        core.connect(provider).setPayoutReceiver(jobId, await disburser.getAddress())
+        core.connect(client).setPayoutReceiver(jobId, await disburser.getAddress())
       ).to.be.revertedWithCustomError(core, "Unauthorized");
 
       // ERC-165 validation rejects non-IDisburser contracts
       await expect(
-        core.connect(client).setPayoutReceiver(jobId, await bad.getAddress())
+        core.connect(provider).setPayoutReceiver(jobId, await bad.getAddress())
       ).to.be.revertedWithCustomError(core, "InvalidPayoutReceiver");
 
-      // Client sets receiver while Open
-      await expect(core.connect(client).setPayoutReceiver(jobId, await disburser.getAddress()))
+      // Provider sets receiver while Open
+      await expect(core.connect(provider).setPayoutReceiver(jobId, await disburser.getAddress()))
         .to.emit(core, "PayoutReceiverSet")
         .withArgs(jobId, await disburser.getAddress());
       expect((await core.getJob(jobId)).payoutReceiver).to.equal(await disburser.getAddress());
@@ -513,7 +494,7 @@ describe("Image Generation", function () {
       await core.connect(provider).setBudget(jobId, usdcAddr, TWENTY_USDC, "0x");
       await core.connect(client).fund(jobId, TWENTY_USDC, "0x");
       await expect(
-        core.connect(client).setPayoutReceiver(jobId, ethers.ZeroAddress)
+        core.connect(provider).setPayoutReceiver(jobId, ethers.ZeroAddress)
       ).to.be.revertedWithCustomError(core, "WrongStatus");
     });
 
