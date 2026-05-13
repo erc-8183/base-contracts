@@ -78,6 +78,16 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
             "Voucher(uint256 jobId,uint256 cumulativeAmount,bytes optParams)"
         );
 
+    /// @notice EIP-712 type hash for the claim-voucher struct used by submitClaim.
+    /// @dev    Binds the deliverable into the signed payload so the client's
+    ///         signature attests to BOTH the amount released and the work
+    ///         delivered. `deliverable` is hashed with keccak256 in the struct
+    ///         hash per EIP-712 dynamic-bytes encoding rules.
+    bytes32 public constant CLAIM_VOUCHER_TYPEHASH =
+        keccak256(
+            "ClaimVoucher(uint256 jobId,uint256 cumulativeAmount,bytes deliverable,bytes optParams)"
+        );
+
     /// @notice Grace period after expiry during which only the evaluator can finalize a Submitted job.
     ///         Prevents third-party censorship of providers who submitted work before expiry.
     uint256 public constant EVALUATION_GRACE_PERIOD = 1 hours;
@@ -100,6 +110,12 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     ///         (no fee-on-transfer, no rebase, no transfer hooks, no pause/blacklist
     ///         that would lock escrowed funds) can be used for job budgets.
     mapping(address => bool) public allowedPaymentTokens;
+    /// @notice Job ID -> hash binding the pending slow-path claim.
+    /// @dev    Hash = keccak256(abi.encode(cumulativeAmount, keccak256(deliverable))).
+    ///         Value of bytes32(0) means no pending claim. Caller of approveClaim /
+    ///         rejectClaim must supply the preimage components for verification.
+    ///         Single-slot storage; only one pending claim per job at a time.
+    mapping(uint256 => bytes32) public pendingClaimHash;
 
     /// @notice Emitted when a new job is created
     event JobCreated(
@@ -180,6 +196,32 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         uint256 cumulativeAmount,
         uint256 delta
     );
+    /// @notice Emitted on each successful submitClaim. Carries the work-evidence
+    ///         deliverable so reputation systems and evaluators can index per-claim
+    ///         work proof. In the fast (voucher) path the deliverable is bound by the
+    ///         client's signature; in the slow path it is attested by approveClaim.
+    event ClaimSubmitted(
+        uint256 indexed jobId,
+        address indexed provider,
+        uint256 cumulativeAmount,
+        uint256 delta,
+        bytes deliverable
+    );
+    /// @notice Emitted when a pending claim is approved by evaluator or client.
+    event ClaimApproved(
+        uint256 indexed jobId,
+        address indexed approver,
+        uint256 cumulativeAmount,
+        uint256 delta,
+        bytes32 deliverableHash
+    );
+    /// @notice Emitted when a pending claim is rejected. Job remains open for
+    ///         further submitClaim attempts by the provider.
+    event ClaimRejected(
+        uint256 indexed jobId,
+        address indexed rejector,
+        bytes32 reason
+    );
     /// @notice Emitted when a hook's whitelist status changes
     event HookWhitelistUpdated(
         address indexed hook,
@@ -247,6 +289,10 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     error NoNewSettlement();
     /// @notice Thrown when cumulative settlement would exceed the job budget
     error ExceedsBudget();
+    /// @notice Thrown when submitting a new slow-path claim while one is already pending
+    error ClaimAlreadyPending();
+    /// @notice Thrown when approveClaim/rejectClaim is called with no pending claim
+    error NoPendingClaim();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -709,6 +755,36 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         ) revert InvalidVoucherSignature();
     }
 
+    /// @dev Verifies an EIP-712 ClaimVoucher signature against the expected signer
+    ///      (client). Binds the deliverable into the digest so the signature
+    ///      attests to the work delivered, not just the amount released.
+    function _verifyClaimVoucher(
+        uint256 jobId,
+        uint256 cumulativeAmount,
+        bytes calldata deliverable,
+        address expectedSigner,
+        bytes calldata optParams,
+        bytes calldata sig
+    ) internal view {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                CLAIM_VOUCHER_TYPEHASH,
+                jobId,
+                cumulativeAmount,
+                keccak256(deliverable),
+                keccak256(optParams)
+            )
+        );
+        bytes32 digest = _hashTypedDataV4(structHash);
+        if (
+            !SignatureChecker.isValidSignatureNowCalldata(
+                expectedSigner,
+                digest,
+                sig
+            )
+        ) revert InvalidVoucherSignature();
+    }
+
     /// @notice Voucher-based partial settlement (Provider only).
     /// @dev    Verifies an EIP-712 Voucher signed by the client and releases only the new delta.
     ///         Incremental — does not close the job. Job remains Funded or Submitted.
@@ -764,6 +840,198 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         emit PaymentReleased(jobId, job.provider, net);
 
         emit Settled(jobId, cumulativeAmount, delta);
+
+        _afterHook(job.hook, jobId, msg.sig, data);
+    }
+
+    // ──────────────────── Claim Workflow ────────────────────
+
+    /// @dev Shared fee/payment distribution used by claim settlement paths.
+    function _distributeSettlement(
+        uint256 jobId,
+        Job storage job,
+        uint256 delta
+    ) internal {
+        uint256 platformFee = (delta * platformFeeBP) / 10000;
+        uint256 evalFee = (delta * evaluatorFeeBP) / 10000;
+        uint256 net = delta - platformFee - evalFee;
+
+        IERC20 token = IERC20(job.paymentToken);
+        if (platformFee > 0) {
+            token.safeTransfer(platformTreasury, platformFee);
+            emit PlatformFeePaid(jobId, platformTreasury, platformFee);
+        }
+        if (evalFee > 0) {
+            token.safeTransfer(job.evaluator, evalFee);
+            emit EvaluatorFeePaid(jobId, job.evaluator, evalFee);
+        }
+        if (net > 0) {
+            token.safeTransfer(job.provider, net);
+        }
+        emit PaymentReleased(jobId, job.provider, net);
+    }
+
+    /// @notice Unified claim submission (Provider only). Both fast and slow paths share
+    ///         this entry point; the length of `deliverable` selects between them:
+    ///           - `deliverable.length == 0`  → fast path: client signed an
+    ///             unconditional payment authorization (no deliverable to vet).
+    ///             The signature itself is the approval, so the new delta is
+    ///             released in this same tx.
+    ///           - `deliverable.length  > 0`  → slow path: the deliverable is a
+    ///             specific condition the evaluator (or client) must vet against.
+    ///             Stored as a pending claim; awaits `approveClaim` or `rejectClaim`.
+    /// @dev    Both paths require an EIP-712 ClaimVoucher signed by the client and
+    ///         submitted by the provider. Voucher binds (jobId, cumulativeAmount,
+    ///         deliverable, optParams). Incremental — does not close the job.
+    /// @param jobId            The job to claim against
+    /// @param cumulativeAmount Monotonically increasing cumulative gross amount
+    /// @param deliverable      Condition for the evaluator to vet. Empty = fast path
+    ///                         (unconditional, immediate release); non-empty = slow
+    ///                         path (pending approval).
+    /// @param voucherSig       EIP-712 ClaimVoucher signature from the client
+    /// @param optParams        Hook-specific parameters, also bound into the voucher digest
+    function submitClaim(
+        uint256 jobId,
+        uint256 cumulativeAmount,
+        bytes calldata deliverable,
+        bytes calldata voucherSig,
+        bytes calldata optParams
+    ) external whenNotPaused nonReentrant {
+        Job storage job = jobs[jobId];
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
+        if (msg.sender != job.provider) revert Unauthorized();
+        if (
+            job.status != JobStatus.Funded && job.status != JobStatus.Submitted
+        ) revert WrongStatus();
+        if (block.timestamp >= job.expiredAt) revert WrongStatus();
+        if (cumulativeAmount <= job.settledAmount) revert NoNewSettlement();
+        if (cumulativeAmount > job.budget) revert ExceedsBudget();
+
+        // Both paths verify the client's signature over the same voucher struct.
+        _verifyClaimVoucher(
+            jobId,
+            cumulativeAmount,
+            deliverable,
+            job.client,
+            optParams,
+            voucherSig
+        );
+
+        uint256 delta = cumulativeAmount - job.settledAmount;
+        bytes memory data = abi.encode(msg.sender, delta, deliverable, optParams);
+        _beforeHook(job.hook, jobId, msg.sig, data);
+
+        if (deliverable.length == 0) {
+            // ── Fast path ──
+            // No deliverable condition to vet. The client's signature is an
+            // unconditional release authorization, so settle in the same tx.
+            // Voucher supersedes any pending slow-path claim.
+            if (pendingClaimHash[jobId] != bytes32(0)) {
+                delete pendingClaimHash[jobId];
+            }
+            job.settledAmount = cumulativeAmount;
+            _distributeSettlement(jobId, job, delta);
+            emit Settled(jobId, cumulativeAmount, delta);
+            emit ClaimSubmitted(jobId, job.provider, cumulativeAmount, delta, deliverable);
+        } else {
+            // ── Slow path ──
+            // Deliverable is a specific condition the evaluator/client must vet.
+            // Only the hash binding (amount, deliverableHash) is stored to keep
+            // pending state to one slot; the full deliverable bytes are emitted
+            // via ClaimSubmitted so approvers can read it from event logs.
+            if (pendingClaimHash[jobId] != bytes32(0)) revert ClaimAlreadyPending();
+            pendingClaimHash[jobId] = _claimHash(cumulativeAmount, keccak256(deliverable));
+            emit ClaimSubmitted(jobId, job.provider, cumulativeAmount, delta, deliverable);
+        }
+
+        _afterHook(job.hook, jobId, msg.sig, data);
+    }
+
+    /// @dev Recomputes the pending-claim binding hash from its components.
+    function _claimHash(
+        uint256 cumulativeAmount,
+        bytes32 deliverableHash
+    ) internal pure returns (bytes32) {
+        return keccak256(abi.encode(cumulativeAmount, deliverableHash));
+    }
+
+    /// @notice Approves the pending slow-path claim for a job. Client or evaluator.
+    /// @dev    Caller supplies `cumulativeAmount` + `deliverableHash` (preimage of the
+    ///         stored binding hash). Contract recomputes the hash and rejects any
+    ///         mismatch, so approvers cannot release funds for a claim other than
+    ///         the one the provider committed to. Releases the delta and clears
+    ///         the pending claim.
+    /// @param jobId            The job whose pending claim to approve
+    /// @param cumulativeAmount Claim amount the provider committed (read from ClaimSubmitted)
+    /// @param deliverableHash  keccak256(deliverable) the provider committed (read from event)
+    /// @param optParams        Hook-specific parameters
+    function approveClaim(
+        uint256 jobId,
+        uint256 cumulativeAmount,
+        bytes32 deliverableHash,
+        bytes calldata optParams
+    ) external whenNotPaused nonReentrant {
+        Job storage job = jobs[jobId];
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
+        if (msg.sender != job.client && msg.sender != job.evaluator) revert Unauthorized();
+        if (
+            job.status != JobStatus.Funded && job.status != JobStatus.Submitted
+        ) revert WrongStatus();
+
+        bytes32 stored = pendingClaimHash[jobId];
+        if (stored == bytes32(0)) revert NoPendingClaim();
+        if (stored != _claimHash(cumulativeAmount, deliverableHash)) revert NoPendingClaim();
+        if (cumulativeAmount <= job.settledAmount) revert NoNewSettlement();
+        if (cumulativeAmount > job.budget) revert ExceedsBudget();
+
+        uint256 delta = cumulativeAmount - job.settledAmount;
+        bytes memory data = abi.encode(msg.sender, delta, deliverableHash, optParams);
+        _beforeHook(job.hook, jobId, msg.sig, data);
+
+        delete pendingClaimHash[jobId];
+        job.settledAmount = cumulativeAmount;
+        _distributeSettlement(jobId, job, delta);
+
+        emit Settled(jobId, cumulativeAmount, delta);
+        emit ClaimApproved(jobId, msg.sender, cumulativeAmount, delta, deliverableHash);
+
+        _afterHook(job.hook, jobId, msg.sig, data);
+    }
+
+    /// @notice Rejects the pending slow-path claim for a job. Client or evaluator.
+    /// @dev    Caller supplies the claim preimage components for hash verification,
+    ///         same as approveClaim. Clears the pending claim without releasing funds;
+    ///         the provider can submit a revised claim afterwards. Use `reject` to
+    ///         terminate the job entirely.
+    /// @param jobId            The job whose pending claim to reject
+    /// @param cumulativeAmount Claim amount being rejected
+    /// @param deliverableHash  keccak256(deliverable) being rejected
+    /// @param reason           Rejection reason (bytes32 tag)
+    /// @param optParams        Hook-specific parameters
+    function rejectClaim(
+        uint256 jobId,
+        uint256 cumulativeAmount,
+        bytes32 deliverableHash,
+        bytes32 reason,
+        bytes calldata optParams
+    ) external whenNotPaused nonReentrant {
+        Job storage job = jobs[jobId];
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
+        if (msg.sender != job.client && msg.sender != job.evaluator) revert Unauthorized();
+        if (
+            job.status != JobStatus.Funded && job.status != JobStatus.Submitted
+        ) revert WrongStatus();
+
+        bytes32 stored = pendingClaimHash[jobId];
+        if (stored == bytes32(0)) revert NoPendingClaim();
+        if (stored != _claimHash(cumulativeAmount, deliverableHash)) revert NoPendingClaim();
+
+        bytes memory data = abi.encode(msg.sender, reason, deliverableHash, optParams);
+        _beforeHook(job.hook, jobId, msg.sig, data);
+
+        delete pendingClaimHash[jobId];
+
+        emit ClaimRejected(jobId, msg.sender, reason);
 
         _afterHook(job.hook, jobId, msg.sig, data);
     }
