@@ -24,7 +24,7 @@ describe("Image Generation", function () {
   const TEN_USDC = 10_000_000n;
   const FIVE_USDC = 5_000_000n;
   const ONE_USDC = 1_000_000n;
-  const EMPTY_DELIVERABLE = "0x";
+  const EMPTY_DELIVERABLE = ethers.ZeroHash;
 
   async function deployFixture() {
     const [deployer, client, provider, evaluator] = await ethers.getSigners();
@@ -76,7 +76,7 @@ describe("Image Generation", function () {
         ClaimVoucher: [
           { name: "jobId", type: "uint256" },
           { name: "cumulativeAmount", type: "uint256" },
-          { name: "deliverable", type: "bytes" },
+          { name: "deliverable", type: "bytes32" },
           { name: "optParams", type: "bytes" },
         ],
       },
@@ -237,13 +237,13 @@ describe("Image Generation", function () {
     // ──────────────────────────────────────────────────────────
     const IMAGE_URL =
       "https://png.pngtree.com/background/20250111/original/pngtree-nice-background-beautiful-h5-wallpaper-imag-picture-image_15708053.jpg";
-    const deliverableHash = ethers.keccak256(ethers.toUtf8Bytes(IMAGE_URL));
+    const deliverable = ethers.keccak256(ethers.toUtf8Bytes(IMAGE_URL));
 
     await expect(
-      core.connect(provider).submit(jobId, deliverableHash, "0x")
+      core.connect(provider).submit(jobId, deliverable, "0x")
     )
       .to.emit(core, "JobSubmitted")
-      .withArgs(jobId, provider.address, deliverableHash);
+      .withArgs(jobId, provider.address, deliverable);
 
     expect((await core.getJob(jobId)).status).to.equal(2n); // Submitted
 
@@ -579,7 +579,7 @@ describe("Image Generation", function () {
   });
 });
 
-describe("submitClaim (unified fast/slow by deliverable length)", function () {
+describe("submitClaim (unified fast/slow by deliverable value)", function () {
   const TWENTY_USDC = 20_000_000n;
   const TEN_USDC = 10_000_000n;
   const FIVE_USDC = 5_000_000n;
@@ -610,7 +610,7 @@ describe("submitClaim (unified fast/slow by deliverable length)", function () {
     return { usdc, core, deployer, client, provider, evaluator, outsider, jobId };
   }
 
-  // Both paths require a client-signed ClaimVoucher. Empty deliverable = fast.
+  // Both paths require a client-signed ClaimVoucher. bytes32(0) deliverable = fast.
   async function signClaim({ core, signer, jobId, cumulativeAmount, deliverable, optParams = "0x" }) {
     const { chainId } = await ethers.provider.getNetwork();
     return signer.signTypedData(
@@ -624,7 +624,7 @@ describe("submitClaim (unified fast/slow by deliverable length)", function () {
         ClaimVoucher: [
           { name: "jobId", type: "uint256" },
           { name: "cumulativeAmount", type: "uint256" },
-          { name: "deliverable", type: "bytes" },
+          { name: "deliverable", type: "bytes32" },
           { name: "optParams", type: "bytes" },
         ],
       },
@@ -632,18 +632,18 @@ describe("submitClaim (unified fast/slow by deliverable length)", function () {
     );
   }
 
-  const DELIVERABLE_A = "0xdeadbeefcafef00d";
-  const DELIVERABLE_B = "0xfeedfacebabe1234";
+  const DELIVERABLE_A = ethers.encodeBytes32String("deliverable-a");
+  const DELIVERABLE_B = ethers.encodeBytes32String("deliverable-b");
   const OPT_PARAMS_A = "0x1234";
   const OPT_PARAMS_B = "0xabcd";
-  const EMPTY = "0x";
+  const EMPTY = ethers.ZeroHash;
 
   // Compute the on-chain pending-claim binding hash.
   const claimBindingHash = (amount, deliverable, optParams = "0x") =>
     ethers.keccak256(
       ethers.AbiCoder.defaultAbiCoder().encode(
         ["uint256", "bytes32", "bytes32"],
-        [amount, ethers.keccak256(deliverable), ethers.keccak256(optParams)]
+        [amount, deliverable, ethers.keccak256(optParams)]
       )
     );
 
@@ -653,7 +653,7 @@ describe("submitClaim (unified fast/slow by deliverable length)", function () {
     expect(core.interface.hasFunction("settle(uint256,uint256,bytes,bytes)")).to.equal(false);
   });
 
-  it("fast path (empty deliverable): unconditional voucher, settles in same tx", async function () {
+  it("fast path (zero deliverable): unconditional voucher, settles in same tx", async function () {
     const { usdc, core, client, provider, jobId } = await loadFixture(deployFixture);
 
     const sig = await signClaim({ core, signer: client, jobId, cumulativeAmount: TEN_USDC, deliverable: EMPTY });
@@ -666,7 +666,7 @@ describe("submitClaim (unified fast/slow by deliverable length)", function () {
     expect(await core.pendingClaimHash(jobId)).to.equal(ethers.ZeroHash);
   });
 
-  it("slow path (non-empty deliverable): stored as hash, evaluator approves with preimage", async function () {
+  it("slow path (nonzero deliverable): stored as hash, evaluator approves with deliverable", async function () {
     const { usdc, core, client, provider, evaluator, jobId } = await loadFixture(deployFixture);
 
     const sig = await signClaim({
@@ -685,12 +685,11 @@ describe("submitClaim (unified fast/slow by deliverable length)", function () {
     expect(await usdc.balanceOf(provider.address)).to.equal(0n);
     expect(await core.pendingClaimHash(jobId)).to.equal(claimBindingHash(TEN_USDC, DELIVERABLE_A, OPT_PARAMS_A));
 
-    const dHash = ethers.keccak256(DELIVERABLE_A);
     await expect(
-      core.connect(evaluator).approveClaim(jobId, TEN_USDC, dHash, OPT_PARAMS_B)
+      core.connect(evaluator).approveClaim(jobId, TEN_USDC, DELIVERABLE_A, OPT_PARAMS_B)
     ).to.be.revertedWithCustomError(core, "NoPendingClaim");
-    await expect(core.connect(evaluator).approveClaim(jobId, TEN_USDC, dHash, OPT_PARAMS_A))
-      .to.emit(core, "ClaimApproved").withArgs(jobId, evaluator.address, TEN_USDC, TEN_USDC, dHash);
+    await expect(core.connect(evaluator).approveClaim(jobId, TEN_USDC, DELIVERABLE_A, OPT_PARAMS_A))
+      .to.emit(core, "ClaimApproved").withArgs(jobId, evaluator.address, TEN_USDC, TEN_USDC, DELIVERABLE_A);
     expect(await usdc.balanceOf(provider.address)).to.equal(TEN_USDC);
     expect(await core.pendingClaimHash(jobId)).to.equal(ethers.ZeroHash);
   });
@@ -700,13 +699,13 @@ describe("submitClaim (unified fast/slow by deliverable length)", function () {
     const sig = await signClaim({ core, signer: client, jobId, cumulativeAmount: TEN_USDC, deliverable: DELIVERABLE_A });
     await core.connect(provider).submitClaim(jobId, TEN_USDC, DELIVERABLE_A, sig, "0x");
 
-    // Wrong deliverableHash
+    // Wrong deliverable
     await expect(
-      core.connect(evaluator).approveClaim(jobId, TEN_USDC, ethers.keccak256(DELIVERABLE_B), "0x")
+      core.connect(evaluator).approveClaim(jobId, TEN_USDC, DELIVERABLE_B, "0x")
     ).to.be.revertedWithCustomError(core, "NoPendingClaim");
     // Wrong amount
     await expect(
-      core.connect(evaluator).approveClaim(jobId, FIVE_USDC, ethers.keccak256(DELIVERABLE_A), "0x")
+      core.connect(evaluator).approveClaim(jobId, FIVE_USDC, DELIVERABLE_A, "0x")
     ).to.be.revertedWithCustomError(core, "NoPendingClaim");
   });
 
@@ -726,15 +725,23 @@ describe("submitClaim (unified fast/slow by deliverable length)", function () {
       .to.be.revertedWithCustomError(core, "InvalidVoucherSignature");
   });
 
+  it("submitClaim: reverts once job is Submitted", async function () {
+    const { core, client, provider, jobId } = await loadFixture(deployFixture);
+    await core.connect(provider).submit(jobId, ethers.encodeBytes32String("work"), "0x");
+
+    const sig = await signClaim({ core, signer: client, jobId, cumulativeAmount: TEN_USDC, deliverable: EMPTY });
+    await expect(core.connect(provider).submitClaim(jobId, TEN_USDC, EMPTY, sig, "0x"))
+      .to.be.revertedWithCustomError(core, "WrongStatus");
+  });
+
   it("approveClaim: client OR evaluator only; provider self-approve reverts", async function () {
     const { core, client, provider, jobId } = await loadFixture(deployFixture);
     const sig = await signClaim({ core, signer: client, jobId, cumulativeAmount: TEN_USDC, deliverable: DELIVERABLE_A });
     await core.connect(provider).submitClaim(jobId, TEN_USDC, DELIVERABLE_A, sig, "0x");
 
-    const dHash = ethers.keccak256(DELIVERABLE_A);
-    await expect(core.connect(provider).approveClaim(jobId, TEN_USDC, dHash, "0x"))
+    await expect(core.connect(provider).approveClaim(jobId, TEN_USDC, DELIVERABLE_A, "0x"))
       .to.be.revertedWithCustomError(core, "Unauthorized");
-    await expect(core.connect(client).approveClaim(jobId, TEN_USDC, dHash, "0x"))
+    await expect(core.connect(client).approveClaim(jobId, TEN_USDC, DELIVERABLE_A, "0x"))
       .to.emit(core, "ClaimApproved");
   });
 
@@ -742,14 +749,24 @@ describe("submitClaim (unified fast/slow by deliverable length)", function () {
     const { core, client, provider, outsider, jobId } = await loadFixture(deployFixture);
     const sig = await signClaim({ core, signer: client, jobId, cumulativeAmount: TEN_USDC, deliverable: DELIVERABLE_A });
     await core.connect(provider).submitClaim(jobId, TEN_USDC, DELIVERABLE_A, sig, "0x");
-    await expect(core.connect(outsider).approveClaim(jobId, TEN_USDC, ethers.keccak256(DELIVERABLE_A), "0x"))
+    await expect(core.connect(outsider).approveClaim(jobId, TEN_USDC, DELIVERABLE_A, "0x"))
       .to.be.revertedWithCustomError(core, "Unauthorized");
   });
 
   it("approveClaim: NoPendingClaim when nothing pending", async function () {
     const { core, evaluator, jobId } = await loadFixture(deployFixture);
-    await expect(core.connect(evaluator).approveClaim(jobId, TEN_USDC, ethers.keccak256(DELIVERABLE_A), "0x"))
+    await expect(core.connect(evaluator).approveClaim(jobId, TEN_USDC, DELIVERABLE_A, "0x"))
       .to.be.revertedWithCustomError(core, "NoPendingClaim");
+  });
+
+  it("approveClaim: reverts once job is Submitted", async function () {
+    const { core, client, provider, evaluator, jobId } = await loadFixture(deployFixture);
+    const sig = await signClaim({ core, signer: client, jobId, cumulativeAmount: TEN_USDC, deliverable: DELIVERABLE_A });
+    await core.connect(provider).submitClaim(jobId, TEN_USDC, DELIVERABLE_A, sig, "0x");
+    await core.connect(provider).submit(jobId, ethers.encodeBytes32String("work"), "0x");
+
+    await expect(core.connect(evaluator).approveClaim(jobId, TEN_USDC, DELIVERABLE_A, "0x"))
+      .to.be.revertedWithCustomError(core, "WrongStatus");
   });
 
   it("slow path: latest claim replaces pending hash and invalidates old approvals", async function () {
@@ -764,7 +781,7 @@ describe("submitClaim (unified fast/slow by deliverable length)", function () {
 
     expect(await core.pendingClaimHash(jobId)).to.equal(claimBindingHash(TWENTY_USDC, DELIVERABLE_B));
     await expect(
-      core.connect(client).approveClaim(jobId, TEN_USDC, ethers.keccak256(DELIVERABLE_A), "0x")
+      core.connect(client).approveClaim(jobId, TEN_USDC, DELIVERABLE_A, "0x")
     ).to.be.revertedWithCustomError(core, "NoPendingClaim");
   });
 
@@ -776,7 +793,7 @@ describe("submitClaim (unified fast/slow by deliverable length)", function () {
     await core.connect(evaluator).rejectClaim(
       jobId,
       TEN_USDC,
-      ethers.keccak256(DELIVERABLE_A),
+      DELIVERABLE_A,
       ethers.encodeBytes32String("rework"),
       "0x"
     );
@@ -814,7 +831,7 @@ describe("submitClaim (unified fast/slow by deliverable length)", function () {
       optParams: OPT_PARAMS_A,
     });
     const expectedData = ethers.AbiCoder.defaultAbiCoder().encode(
-      ["address", "uint256", "bytes", "bytes"],
+      ["address", "uint256", "bytes32", "bytes"],
       [provider.address, cumulativeAmount, DELIVERABLE_A, OPT_PARAMS_A]
     );
 
@@ -829,8 +846,7 @@ describe("submitClaim (unified fast/slow by deliverable length)", function () {
     await core.connect(provider).submitClaim(jobId, TEN_USDC, DELIVERABLE_A, sig, "0x");
 
     const reason = ethers.encodeBytes32String("rework");
-    const dHashA = ethers.keccak256(DELIVERABLE_A);
-    await expect(core.connect(evaluator).rejectClaim(jobId, TEN_USDC, dHashA, reason, "0x"))
+    await expect(core.connect(evaluator).rejectClaim(jobId, TEN_USDC, DELIVERABLE_A, reason, "0x"))
       .to.emit(core, "ClaimRejected").withArgs(jobId, evaluator.address, reason);
     expect(await core.pendingClaimHash(jobId)).to.equal(ethers.ZeroHash);
 
@@ -844,8 +860,19 @@ describe("submitClaim (unified fast/slow by deliverable length)", function () {
     const sig = await signClaim({ core, signer: client, jobId, cumulativeAmount: TEN_USDC, deliverable: DELIVERABLE_A });
     await core.connect(provider).submitClaim(jobId, TEN_USDC, DELIVERABLE_A, sig, "0x");
     await expect(
-      core.connect(provider).rejectClaim(jobId, TEN_USDC, ethers.keccak256(DELIVERABLE_A), ethers.ZeroHash, "0x")
+      core.connect(provider).rejectClaim(jobId, TEN_USDC, DELIVERABLE_A, ethers.ZeroHash, "0x")
     ).to.be.revertedWithCustomError(core, "Unauthorized");
+  });
+
+  it("rejectClaim: reverts once job is Submitted", async function () {
+    const { core, client, provider, evaluator, jobId } = await loadFixture(deployFixture);
+    const sig = await signClaim({ core, signer: client, jobId, cumulativeAmount: TEN_USDC, deliverable: DELIVERABLE_A });
+    await core.connect(provider).submitClaim(jobId, TEN_USDC, DELIVERABLE_A, sig, "0x");
+    await core.connect(provider).submit(jobId, ethers.encodeBytes32String("work"), "0x");
+
+    await expect(
+      core.connect(evaluator).rejectClaim(jobId, TEN_USDC, DELIVERABLE_A, ethers.ZeroHash, "0x")
+    ).to.be.revertedWithCustomError(core, "WrongStatus");
   });
 
   it("fast path does not mutate pending slow claim", async function () {

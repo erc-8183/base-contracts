@@ -11,12 +11,11 @@ stateDiagram-v2
     Open --> Rejected: reject()\n[client or provider]
     Open --> Expired: claimRefund()\n[after expiry]\n(no escrow to refund)
 
-    Funded --> Funded: submitClaim(empty deliverable)\n[provider, with client ClaimVoucher]\n💸 delta released
+    Funded --> Funded: submitClaim(bytes32(0) deliverable)\n[provider, with client ClaimVoucher]\n💸 delta released
     Funded --> Submitted: submit(deliverable)\n[provider only]
     Funded --> Rejected: reject()\n[evaluator only]\n↩️ unsettled escrow refunded
     Funded --> Expired: claimRefund()\n[after expiry]\n↩️ unsettled escrow refunded
 
-    Submitted --> Submitted: submitClaim(empty deliverable)\n[provider, with client ClaimVoucher]\n💸 delta released
     Submitted --> Completed: complete(reason)\n[evaluator only]\n💸 unsettled remainder paid
     Submitted --> Rejected: reject(reason)\n[evaluator only]\n↩️ unsettled escrow refunded
     Submitted --> Expired: claimRefund()\n[after expiry + grace]\n↩️ unsettled escrow refunded
@@ -28,7 +27,7 @@ stateDiagram-v2
 
 After expiry, `claimRefund` is callable by anyone. For `Submitted` jobs, it is gated by an additional `EVALUATION_GRACE_PERIOD` (1 hour) so that an evaluator who is mid-review cannot be censored by a third-party refund call.
 
-`submitClaim` with an empty `deliverable` is an in-place self-transition: it releases an incremental portion of the escrow against a client-signed `ClaimVoucher` without changing the job's status. The cumulative amount released is tracked in `Job.settledAmount`. `complete`, `reject`, and `claimRefund` always net `settledAmount` out of the budget, so already-released funds are never double-paid or double-refunded.
+`submitClaim` with `deliverable == bytes32(0)` is a `Funded`-state self-transition: it releases an incremental portion of the escrow against a client-signed `ClaimVoucher` without changing the job's status. Slow claim submission, `approveClaim`, and `rejectClaim` are also only processed while the job is `Funded`; after `submit`, the job is under evaluator review. The cumulative amount released is tracked in `Job.settledAmount`. `complete`, `reject`, and `claimRefund` always net `settledAmount` out of the budget, so already-released funds are never double-paid or double-refunded.
 
 ## Sequence — Typical Job Flow (No Hook)
 
@@ -91,7 +90,7 @@ sequenceDiagram
 
 ## Sequence — Partial Settlement (ClaimVoucher)
 
-`submitClaim` with an empty `deliverable` lets the provider draw client-authorized incremental payments while a job is still active (`Funded` or `Submitted`). The client signs an EIP-712 `ClaimVoucher` off-chain that authorizes a **monotonically increasing cumulative amount** and an empty deliverable; on-chain the contract releases only the delta against the prior `settledAmount`. The job stays in its current status — settlement does not finalize the job.
+`submitClaim` with `deliverable == bytes32(0)` lets the provider draw client-authorized incremental payments while a job is `Funded`, before formal submission for evaluator review. The client signs an EIP-712 `ClaimVoucher` off-chain that authorizes a **monotonically increasing cumulative amount** and a zero deliverable; on-chain the contract releases only the delta against the prior `settledAmount`. The job stays `Funded` — settlement does not finalize the job.
 
 ```mermaid
 sequenceDiagram
@@ -105,8 +104,8 @@ sequenceDiagram
     C->>AC: fund(jobId, budget, "0x")
     Note over AC: settledAmount = 0
 
-    C-->>P: signs ClaimVoucher(jobId, cumulativeAmount, "0x", optParams)
-    P->>AC: submitClaim(jobId, cumulativeAmount, "0x", voucherSig, optParams)
+    C-->>P: signs ClaimVoucher(jobId, cumulativeAmount, bytes32(0), optParams)
+    P->>AC: submitClaim(jobId, cumulativeAmount, bytes32(0), voucherSig, optParams)
     Note over AC: verify ClaimVoucher
     Note over AC: delta = cumulativeAmount - settledAmount
     AC->>P: transfer provider net amount
@@ -118,18 +117,20 @@ sequenceDiagram
     Note over AC: releases only budget - settledAmount
 ```
 
-Provider can use the fast `submitClaim` path repeatedly with successively larger `cumulativeAmount` values until either:
+Provider can use the fast `submitClaim` path repeatedly with successively larger `cumulativeAmount` values until one of these happens:
 
 - the cumulative reaches `budget` (job is fully drawn), or
-- the evaluator finalizes via `complete` — which then releases only `budget − settledAmount` (with fees on that remainder), or
+- the provider calls `submit`, moving the job to evaluator review, or
 - the job ends via `reject` / `claimRefund` — which refund only `budget − settledAmount` to the client.
+
+If the provider later calls `submit` and the evaluator finalizes via `complete`, `complete` releases only `budget − settledAmount` with fees on that remainder.
 
 **Reverts**
 
 | Condition | Error |
 | --- | --- |
 | Caller is not `job.provider` | `Unauthorized` |
-| Job not in `Funded` or `Submitted` | `WrongStatus` |
+| Job not in `Funded` | `WrongStatus` |
 | `block.timestamp >= job.expiredAt` | `WrongStatus` |
 | `cumulativeAmount <= settledAmount` | `NoNewSettlement` |
 | `cumulativeAmount > job.budget` | `ExceedsBudget` |
@@ -137,4 +138,4 @@ Provider can use the fast `submitClaim` path repeatedly with successively larger
 
 **Hook interaction.** When a hook is attached, fast `submitClaim` fires `beforeAction` / `afterAction` with `selector = submitClaim.selector` and `data = abi.encode(provider, cumulativeAmount, deliverable, optParams)`. Because the client signs over `optParams`, hooks can rely on those parameters being client-authorized for the submitted claim.
 
-**ClaimVoucher encoding.** The claim voucher binds `(jobId, cumulativeAmount, deliverable, optParams)` under the EIP-712 domain `("ERC8183", "1", chainId, verifyingContract)`. Signature verification goes through `SignatureChecker`, so both EOA signatures and ERC-1271 smart-wallet signatures are supported.
+**ClaimVoucher encoding.** The claim voucher binds `(jobId, cumulativeAmount, bytes32 deliverable, optParams)` under the EIP-712 domain `("ERC8183", "1", chainId, verifyingContract)`. Signature verification goes through `SignatureChecker`, so both EOA signatures and ERC-1271 smart-wallet signatures are supported.
