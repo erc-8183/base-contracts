@@ -47,7 +47,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     /// @param evaluator        Third-party attestor
     /// @param submittedAt      Unix timestamp when provider submitted work
     /// @param budget           Escrowed payment amount in paymentToken units
-    /// @param settledAmount    Cumulative gross amount released via partial settlement vouchers
+    /// @param settledAmount    Cumulative gross amount released via claim settlements
     /// @param hook             Hook contract for before/after callbacks (address(0) = no hook)
     /// @param paymentToken     ERC-20 token used for job payment
     /// @param providerAgentId  Optional ERC-8004 agent identity for provider
@@ -70,13 +70,6 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     string public constant EIP712_NAME = "ERC8183";
     string public constant EIP712_VERSION = "1";
-
-    /// @notice EIP-712 type hash for the partial-settlement Voucher struct.
-    /// @dev    chainId and verifyingContract are bound by the EIP-712 domain separator.
-    bytes32 public constant VOUCHER_TYPEHASH =
-        keccak256(
-            "Voucher(uint256 jobId,uint256 cumulativeAmount,bytes optParams)"
-        );
 
     /// @notice EIP-712 type hash for the claim-voucher struct used by submitClaim.
     /// @dev    Binds the deliverable into the signed payload so the client's
@@ -111,11 +104,15 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     ///         that would lock escrowed funds) can be used for job budgets.
     mapping(address => bool) public allowedPaymentTokens;
     /// @notice Job ID -> hash binding the pending slow-path claim.
-    /// @dev    Hash = keccak256(abi.encode(cumulativeAmount, keccak256(deliverable))).
+    /// @dev    Hash = keccak256(abi.encode(cumulativeAmount, keccak256(deliverable), keccak256(optParams))).
     ///         Value of bytes32(0) means no pending claim. Caller of approveClaim /
     ///         rejectClaim must supply the preimage components for verification.
     ///         Single-slot storage; only one pending claim per job at a time.
     mapping(uint256 => bytes32) public pendingClaimHash;
+    /// @notice Job ID -> claim hash -> whether the claim hash has already been submitted.
+    /// @dev    This prevents exact replay of old slow-path claims without introducing
+    ///         claim sequence numbers or storing full claim history.
+    mapping(uint256 => mapping(bytes32 => bool)) public submittedClaimHash;
 
     /// @notice Emitted when a new job is created
     event JobCreated(
@@ -198,7 +195,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     );
     /// @notice Emitted on each successful submitClaim. Carries the work-evidence
     ///         deliverable so reputation systems and evaluators can index per-claim
-    ///         work proof. In the fast (voucher) path the deliverable is bound by the
+    ///         work proof. In the fast claim path the deliverable is bound by the
     ///         client's signature; in the slow path it is attested by approveClaim.
     event ClaimSubmitted(
         uint256 indexed jobId,
@@ -283,14 +280,14 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     error PaymentTokenNotAllowed();
     /// @notice Thrown when funded amount received differs from expected (fee-on-transfer / rebasing tokens)
     error UnexpectedFundedAmount();
-    /// @notice Thrown when a Voucher signature does not match the client
+    /// @notice Thrown when a ClaimVoucher signature does not match the client
     error InvalidVoucherSignature();
-    /// @notice Thrown when a settle voucher does not advance the cumulative amount
+    /// @notice Thrown when a claim does not advance the cumulative amount
     error NoNewSettlement();
     /// @notice Thrown when cumulative settlement would exceed the job budget
     error ExceedsBudget();
-    /// @notice Thrown when submitting a new slow-path claim while one is already pending
-    error ClaimAlreadyPending();
+    /// @notice Thrown when submitting a slow-path claim hash that was already submitted
+    error ClaimAlreadySubmitted();
     /// @notice Thrown when approveClaim/rejectClaim is called with no pending claim
     error NoPendingClaim();
 
@@ -726,35 +723,6 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         emit JobExpired(jobId);
     }
 
-    // ──────────────────── Partial Settlement ────────────────────
-
-    /// @dev Verifies an EIP-712 Voucher signature against the expected signer (client).
-    function _verifyVoucher(
-        uint256 jobId,
-        uint256 cumulativeAmount,
-        address expectedSigner,
-        bytes calldata optParams,
-        bytes calldata sig
-    ) internal view {
-        // Client signs over optParams to bind hook actions for partial settlement.
-        bytes32 structHash = keccak256(
-            abi.encode(
-                VOUCHER_TYPEHASH,
-                jobId,
-                cumulativeAmount,
-                keccak256(optParams)
-            )
-        );
-        bytes32 digest = _hashTypedDataV4(structHash);
-        if (
-            !SignatureChecker.isValidSignatureNowCalldata(
-                expectedSigner,
-                digest,
-                sig
-            )
-        ) revert InvalidVoucherSignature();
-    }
-
     /// @dev Verifies an EIP-712 ClaimVoucher signature against the expected signer
     ///      (client). Binds the deliverable into the digest so the signature
     ///      attests to the work delivered, not just the amount released.
@@ -783,65 +751,6 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
                 sig
             )
         ) revert InvalidVoucherSignature();
-    }
-
-    /// @notice Voucher-based partial settlement (Provider only).
-    /// @dev    Verifies an EIP-712 Voucher signed by the client and releases only the new delta.
-    ///         Incremental — does not close the job. Job remains Funded or Submitted.
-    /// @param jobId            The job to settle
-    /// @param cumulativeAmount Monotonically increasing cumulative gross amount
-    /// @param voucherSig       EIP-712 Voucher signature from the client
-    /// @param optParams        Hook-specific parameters, also bound into the voucher digest
-    function settle(
-        uint256 jobId,
-        uint256 cumulativeAmount,
-        bytes calldata voucherSig,
-        bytes calldata optParams
-    ) external whenNotPaused nonReentrant {
-        Job storage job = jobs[jobId];
-        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
-        if (msg.sender != job.provider) revert Unauthorized();
-        if (
-            job.status != JobStatus.Funded && job.status != JobStatus.Submitted
-        ) revert WrongStatus();
-        if (block.timestamp >= job.expiredAt) revert WrongStatus();
-        if (cumulativeAmount <= job.settledAmount) revert NoNewSettlement();
-        if (cumulativeAmount > job.budget) revert ExceedsBudget();
-
-        _verifyVoucher(
-            jobId,
-            cumulativeAmount,
-            job.client,
-            optParams,
-            voucherSig
-        );
-
-        uint256 delta = cumulativeAmount - job.settledAmount;
-        bytes memory data = abi.encode(msg.sender, delta, optParams);
-        _beforeHook(job.hook, jobId, msg.sig, data);
-
-        job.settledAmount = cumulativeAmount;
-        uint256 platformFee = (delta * platformFeeBP) / 10000;
-        uint256 evalFee = (delta * evaluatorFeeBP) / 10000;
-        uint256 net = delta - platformFee - evalFee;
-
-        IERC20 token = IERC20(job.paymentToken);
-        if (platformFee > 0) {
-            token.safeTransfer(platformTreasury, platformFee);
-            emit PlatformFeePaid(jobId, platformTreasury, platformFee);
-        }
-        if (evalFee > 0) {
-            token.safeTransfer(job.evaluator, evalFee);
-            emit EvaluatorFeePaid(jobId, job.evaluator, evalFee);
-        }
-        if (net > 0) {
-            token.safeTransfer(job.provider, net);
-        }
-        emit PaymentReleased(jobId, job.provider, net);
-
-        emit Settled(jobId, cumulativeAmount, delta);
-
-        _afterHook(job.hook, jobId, msg.sig, data);
     }
 
     // ──────────────────── Claim Workflow ────────────────────
@@ -881,7 +790,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     ///             specific condition the evaluator (or client) must vet against.
     ///             Stored as a pending claim; awaits `approveClaim` or `rejectClaim`.
     /// @dev    Both paths require an EIP-712 ClaimVoucher signed by the client and
-    ///         submitted by the provider. Voucher binds (jobId, cumulativeAmount,
+    ///         submitted by the provider. ClaimVoucher binds (jobId, cumulativeAmount,
     ///         deliverable, optParams). Incremental — does not close the job.
     /// @param jobId            The job to claim against
     /// @param cumulativeAmount Monotonically increasing cumulative gross amount
@@ -907,7 +816,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         if (cumulativeAmount <= job.settledAmount) revert NoNewSettlement();
         if (cumulativeAmount > job.budget) revert ExceedsBudget();
 
-        // Both paths verify the client's signature over the same voucher struct.
+        // Both paths verify the client's signature over the same ClaimVoucher struct.
         _verifyClaimVoucher(
             jobId,
             cumulativeAmount,
@@ -918,17 +827,13 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         );
 
         uint256 delta = cumulativeAmount - job.settledAmount;
-        bytes memory data = abi.encode(msg.sender, delta, deliverable, optParams);
+        bytes memory data = abi.encode(msg.sender, cumulativeAmount, deliverable, optParams);
         _beforeHook(job.hook, jobId, msg.sig, data);
 
         if (deliverable.length == 0) {
             // ── Fast path ──
             // No deliverable condition to vet. The client's signature is an
-            // unconditional release authorization, so settle in the same tx.
-            // Voucher supersedes any pending slow-path claim.
-            if (pendingClaimHash[jobId] != bytes32(0)) {
-                delete pendingClaimHash[jobId];
-            }
+            // unconditional release authorization, so release funds in the same tx.
             job.settledAmount = cumulativeAmount;
             _distributeSettlement(jobId, job, delta);
             emit Settled(jobId, cumulativeAmount, delta);
@@ -936,11 +841,13 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         } else {
             // ── Slow path ──
             // Deliverable is a specific condition the evaluator/client must vet.
-            // Only the hash binding (amount, deliverableHash) is stored to keep
+            // Only the hash binding (amount, deliverableHash, optParamsHash) is stored to keep
             // pending state to one slot; the full deliverable bytes are emitted
             // via ClaimSubmitted so approvers can read it from event logs.
-            if (pendingClaimHash[jobId] != bytes32(0)) revert ClaimAlreadyPending();
-            pendingClaimHash[jobId] = _claimHash(cumulativeAmount, keccak256(deliverable));
+            bytes32 claimHash = _claimHash(cumulativeAmount, keccak256(deliverable), keccak256(optParams));
+            if (submittedClaimHash[jobId][claimHash]) revert ClaimAlreadySubmitted();
+            submittedClaimHash[jobId][claimHash] = true;
+            pendingClaimHash[jobId] = claimHash;
             emit ClaimSubmitted(jobId, job.provider, cumulativeAmount, delta, deliverable);
         }
 
@@ -950,13 +857,14 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     /// @dev Recomputes the pending-claim binding hash from its components.
     function _claimHash(
         uint256 cumulativeAmount,
-        bytes32 deliverableHash
+        bytes32 deliverableHash,
+        bytes32 optParamsHash
     ) internal pure returns (bytes32) {
-        return keccak256(abi.encode(cumulativeAmount, deliverableHash));
+        return keccak256(abi.encode(cumulativeAmount, deliverableHash, optParamsHash));
     }
 
     /// @notice Approves the pending slow-path claim for a job. Client or evaluator.
-    /// @dev    Caller supplies `cumulativeAmount` + `deliverableHash` (preimage of the
+    /// @dev    Caller supplies `cumulativeAmount` + `deliverableHash` + `optParams` (preimage of the
     ///         stored binding hash). Contract recomputes the hash and rejects any
     ///         mismatch, so approvers cannot release funds for a claim other than
     ///         the one the provider committed to. Releases the delta and clears
@@ -980,12 +888,12 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
 
         bytes32 stored = pendingClaimHash[jobId];
         if (stored == bytes32(0)) revert NoPendingClaim();
-        if (stored != _claimHash(cumulativeAmount, deliverableHash)) revert NoPendingClaim();
+        if (stored != _claimHash(cumulativeAmount, deliverableHash, keccak256(optParams))) revert NoPendingClaim();
         if (cumulativeAmount <= job.settledAmount) revert NoNewSettlement();
         if (cumulativeAmount > job.budget) revert ExceedsBudget();
 
         uint256 delta = cumulativeAmount - job.settledAmount;
-        bytes memory data = abi.encode(msg.sender, delta, deliverableHash, optParams);
+        bytes memory data = abi.encode(msg.sender, cumulativeAmount, deliverableHash, optParams);
         _beforeHook(job.hook, jobId, msg.sig, data);
 
         delete pendingClaimHash[jobId];
@@ -1024,9 +932,9 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
 
         bytes32 stored = pendingClaimHash[jobId];
         if (stored == bytes32(0)) revert NoPendingClaim();
-        if (stored != _claimHash(cumulativeAmount, deliverableHash)) revert NoPendingClaim();
+        if (stored != _claimHash(cumulativeAmount, deliverableHash, keccak256(optParams))) revert NoPendingClaim();
 
-        bytes memory data = abi.encode(msg.sender, reason, deliverableHash, optParams);
+        bytes memory data = abi.encode(msg.sender, cumulativeAmount, deliverableHash, reason, optParams);
         _beforeHook(job.hook, jobId, msg.sig, data);
 
         delete pendingClaimHash[jobId];

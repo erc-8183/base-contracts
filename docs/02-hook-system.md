@@ -45,6 +45,9 @@ As produced by `ERC8183`:
 | `submit`    | `abi.encode(address caller, bytes32 deliverable, bytes optParams)`           |
 | `complete`  | `abi.encode(address caller, bytes32 reason, bytes optParams)`                |
 | `reject`    | `abi.encode(address caller, bytes32 reason, bytes optParams)`                |
+| `submitClaim` | `abi.encode(address caller, uint256 cumulativeAmount, bytes deliverable, bytes optParams)` |
+| `approveClaim` | `abi.encode(address caller, uint256 cumulativeAmount, bytes32 deliverableHash, bytes optParams)` |
+| `rejectClaim` | `abi.encode(address caller, uint256 cumulativeAmount, bytes32 deliverableHash, bytes32 reason, bytes optParams)` |
 
 All payloads include `address caller` so the hook knows who initiated the transition.
 
