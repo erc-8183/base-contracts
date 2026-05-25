@@ -5,7 +5,7 @@ const {
   time,
 } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
-describe("ERC8183WithIntent", function () {
+describe("ERC8183WithAuthorization", function () {
   const TWENTY_USDC = 20_000_000n;
 
   async function deployFixture() {
@@ -14,7 +14,7 @@ describe("ERC8183WithIntent", function () {
     const MockUSDC = await ethers.getContractFactory("MockUSDC");
     const usdc = await MockUSDC.deploy();
 
-    const Core = await ethers.getContractFactory("ERC8183WithIntent");
+    const Core = await ethers.getContractFactory("ERC8183WithAuthorization");
     const core = await upgrades.deployProxy(Core, [deployer.address, deployer.address], { kind: "uups" });
     const coreAddr = await core.getAddress();
 
@@ -25,15 +25,15 @@ describe("ERC8183WithIntent", function () {
     return { usdc, core, deployer, client, provider, evaluator, relayer };
   }
 
-  async function signIntent(core, signerWallet, typeName, value) {
+  async function signAuthorization(core, signerWallet, typeName, value) {
     const domain = {
-      name: "ERC8183WithIntent",
+      name: "ERC8183WithAuthorization",
       version: "1",
       chainId: (await ethers.provider.getNetwork()).chainId,
       verifyingContract: await core.getAddress(),
     };
     const types = {
-      CreateJobIntent: [
+      CreateJobAuthorization: [
         { name: "signer", type: "address" },
         { name: "provider", type: "address" },
         { name: "evaluator", type: "address" },
@@ -44,7 +44,15 @@ describe("ERC8183WithIntent", function () {
         { name: "nonce", type: "bytes32" },
         { name: "deadline", type: "uint256" },
       ],
-      SetBudgetIntent: [
+      SetProviderAuthorization: [
+        { name: "signer", type: "address" },
+        { name: "jobId", type: "uint256" },
+        { name: "provider", type: "address" },
+        { name: "agentId", type: "uint256" },
+        { name: "nonce", type: "bytes32" },
+        { name: "deadline", type: "uint256" },
+      ],
+      SetBudgetAuthorization: [
         { name: "signer", type: "address" },
         { name: "jobId", type: "uint256" },
         { name: "token", type: "address" },
@@ -53,7 +61,7 @@ describe("ERC8183WithIntent", function () {
         { name: "nonce", type: "bytes32" },
         { name: "deadline", type: "uint256" },
       ],
-      FundIntent: [
+      FundAuthorization: [
         { name: "signer", type: "address" },
         { name: "jobId", type: "uint256" },
         { name: "expectedBudget", type: "uint256" },
@@ -61,10 +69,18 @@ describe("ERC8183WithIntent", function () {
         { name: "nonce", type: "bytes32" },
         { name: "deadline", type: "uint256" },
       ],
-      SubmitIntent: [
+      SubmitAuthorization: [
         { name: "signer", type: "address" },
         { name: "jobId", type: "uint256" },
         { name: "deliverable", type: "bytes32" },
+        { name: "optParamsHash", type: "bytes32" },
+        { name: "nonce", type: "bytes32" },
+        { name: "deadline", type: "uint256" },
+      ],
+      RejectAuthorization: [
+        { name: "signer", type: "address" },
+        { name: "jobId", type: "uint256" },
+        { name: "reason", type: "bytes32" },
         { name: "optParamsHash", type: "bytes32" },
         { name: "nonce", type: "bytes32" },
         { name: "deadline", type: "uint256" },
@@ -90,7 +106,7 @@ describe("ERC8183WithIntent", function () {
 
     const expiry = (await time.latest()) + 3600;
     const deadline = (await time.latest()) + 7200;
-    const description = "intent image job";
+    const description = "authorization image job";
     const hook = ethers.ZeroAddress;
     const optParams = "0x";
     const usdcAddr = await usdc.getAddress();
@@ -103,10 +119,10 @@ describe("ERC8183WithIntent", function () {
       hook,
       providerAgentId: 0,
     };
-    const createSig = await signIntent(
+    const createSig = await signAuthorization(
       core,
       client,
-      "CreateJobIntent",
+      "CreateJobAuthorization",
       {
         signer: client.address,
         provider: provider.address,
@@ -121,21 +137,21 @@ describe("ERC8183WithIntent", function () {
     );
 
     await expect(
-      core.connect(relayer).createJobWithIntent(createParams, {
+      core.connect(relayer).createJobWithAuthorization(createParams, {
         signer: client.address,
         nonce: nonce(1),
         deadline,
         sig: createSig,
       }),
-    ).to.emit(core, "IntentExecuted").withArgs(client.address, nonce(1));
+    ).to.emit(core, "AuthorizationUsed").withArgs(client.address, nonce(1));
 
     const jobId = 1n;
     expect((await core.getJob(jobId)).client).to.equal(client.address);
 
-    const setBudgetSig = await signIntent(
+    const setBudgetSig = await signAuthorization(
       core,
       provider,
-      "SetBudgetIntent",
+      "SetBudgetAuthorization",
       {
         signer: provider.address,
         jobId,
@@ -146,14 +162,14 @@ describe("ERC8183WithIntent", function () {
         deadline,
       },
     );
-    await core.connect(relayer).setBudgetWithIntent(jobId, usdcAddr, TWENTY_USDC, optParams, {
+    await core.connect(relayer).setBudgetWithAuthorization(jobId, usdcAddr, TWENTY_USDC, optParams, {
       signer: provider.address,
       nonce: nonce(2),
       deadline,
       sig: setBudgetSig,
     });
 
-    const fundSig = await signIntent(core, client, "FundIntent", {
+    const fundSig = await signAuthorization(core, client, "FundAuthorization", {
       signer: client.address,
       jobId,
       expectedBudget: TWENTY_USDC,
@@ -161,7 +177,7 @@ describe("ERC8183WithIntent", function () {
       nonce: nonce(3),
       deadline,
     });
-    await core.connect(relayer).fundWithIntent(jobId, TWENTY_USDC, optParams, {
+    await core.connect(relayer).fundWithAuthorization(jobId, TWENTY_USDC, optParams, {
       signer: client.address,
       nonce: nonce(3),
       deadline,
@@ -169,7 +185,7 @@ describe("ERC8183WithIntent", function () {
     });
 
     const deliverable = ethers.encodeBytes32String("done");
-    const submitSig = await signIntent(core, provider, "SubmitIntent", {
+    const submitSig = await signAuthorization(core, provider, "SubmitAuthorization", {
       signer: provider.address,
       jobId,
       deliverable,
@@ -177,7 +193,7 @@ describe("ERC8183WithIntent", function () {
       nonce: nonce(4),
       deadline,
     });
-    await core.connect(relayer).submitWithIntent(jobId, deliverable, optParams, {
+    await core.connect(relayer).submitWithAuthorization(jobId, deliverable, optParams, {
       signer: provider.address,
       nonce: nonce(4),
       deadline,
@@ -191,7 +207,7 @@ describe("ERC8183WithIntent", function () {
     expect(await usdc.balanceOf(provider.address)).to.equal(TWENTY_USDC);
   });
 
-  it("rejects replayed, expired, and tampered intents", async function () {
+  it("rejects replayed, expired, and tampered authorizations", async function () {
     const { core, client, provider, evaluator, relayer } = await loadFixture(deployFixture);
     const expiry = (await time.latest()) + 3600;
     const deadline = (await time.latest()) + 7200;
@@ -205,10 +221,10 @@ describe("ERC8183WithIntent", function () {
       hook: ethers.ZeroAddress,
       providerAgentId: 0,
     };
-    const sig = await signIntent(
+    const sig = await signAuthorization(
       core,
       client,
-      "CreateJobIntent",
+      "CreateJobAuthorization",
       {
         signer: client.address,
         provider: provider.address,
@@ -223,16 +239,16 @@ describe("ERC8183WithIntent", function () {
     );
     const auth = { signer: client.address, nonce: authNonce, deadline, sig };
 
-    await core.connect(relayer).createJobWithIntent(params, auth);
-    await expect(core.connect(relayer).createJobWithIntent(params, auth))
-      .to.be.revertedWithCustomError(core, "IntentNonceUsed");
+    await core.connect(relayer).createJobWithAuthorization(params, auth);
+    await expect(core.connect(relayer).createJobWithAuthorization(params, auth))
+      .to.be.revertedWithCustomError(core, "AuthorizationNonceUsed");
 
     const expiredDeadline = (await time.latest()) - 1;
     const expiredNonce = nonce(12);
-    const expiredSig = await signIntent(
+    const expiredSig = await signAuthorization(
       core,
       client,
-      "CreateJobIntent",
+      "CreateJobAuthorization",
       {
         signer: client.address,
         provider: provider.address,
@@ -246,17 +262,17 @@ describe("ERC8183WithIntent", function () {
       },
     );
     await expect(
-      core.connect(relayer).createJobWithIntent(
+      core.connect(relayer).createJobWithAuthorization(
         { ...params, description: "expired" },
         { signer: client.address, nonce: expiredNonce, deadline: expiredDeadline, sig: expiredSig },
       ),
-    ).to.be.revertedWithCustomError(core, "IntentExpired");
+    ).to.be.revertedWithCustomError(core, "AuthorizationExpired");
 
     const tamperedNonce = nonce(13);
-    const tamperedSig = await signIntent(
+    const tamperedSig = await signAuthorization(
       core,
       client,
-      "CreateJobIntent",
+      "CreateJobAuthorization",
       {
         signer: client.address,
         provider: provider.address,
@@ -270,10 +286,10 @@ describe("ERC8183WithIntent", function () {
       },
     );
     await expect(
-      core.connect(relayer).createJobWithIntent(
+      core.connect(relayer).createJobWithAuthorization(
         { ...params, description: "tampered" },
         { signer: client.address, nonce: tamperedNonce, deadline, sig: tamperedSig },
       ),
-    ).to.be.revertedWithCustomError(core, "InvalidIntentSignature");
+    ).to.be.revertedWithCustomError(core, "InvalidAuthorizationSignature");
   });
 });
