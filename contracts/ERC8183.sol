@@ -596,13 +596,22 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         bytes32 reason,
         bytes calldata optParams
     ) external whenNotPaused nonReentrant {
+        _complete(msg.sender, jobId, reason, optParams);
+    }
+
+    function _complete(
+        address actor,
+        uint256 jobId,
+        bytes32 reason,
+        bytes calldata optParams
+    ) internal {
         Job storage job = jobs[jobId];
         if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Submitted) revert WrongStatus();
-        if (msg.sender != job.evaluator) revert Unauthorized();
+        if (actor != job.evaluator) revert Unauthorized();
 
-        bytes memory data = abi.encode(msg.sender, reason, optParams);
-        _beforeHook(job.hook, jobId, msg.sig, data);
+        bytes memory data = abi.encode(actor, reason, optParams);
+        _beforeHook(job.hook, jobId, this.complete.selector, data);
 
         job.status = JobStatus.Completed;
 
@@ -625,9 +634,9 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
             emit PaymentReleased(jobId, job.provider, net);
         }
 
-        emit JobCompleted(jobId, job.evaluator, reason);
+        emit JobCompleted(jobId, actor, reason);
 
-        _afterHook(job.hook, jobId, msg.sig, data);
+        _afterHook(job.hook, jobId, this.complete.selector, data);
     }
 
     /// @notice Rejects a job. Refunds escrowed funds to the client if applicable.

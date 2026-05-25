@@ -77,6 +77,14 @@ describe("ERC8183WithAuthorization", function () {
         { name: "nonce", type: "bytes32" },
         { name: "deadline", type: "uint256" },
       ],
+      CompleteAuthorization: [
+        { name: "signer", type: "address" },
+        { name: "jobId", type: "uint256" },
+        { name: "reason", type: "bytes32" },
+        { name: "optParamsHash", type: "bytes32" },
+        { name: "nonce", type: "bytes32" },
+        { name: "deadline", type: "uint256" },
+      ],
       RejectAuthorization: [
         { name: "signer", type: "address" },
         { name: "jobId", type: "uint256" },
@@ -201,7 +209,20 @@ describe("ERC8183WithAuthorization", function () {
     });
 
     const reason = ethers.encodeBytes32String("approved");
-    await core.connect(evaluator).complete(jobId, reason, optParams);
+    const completeSig = await signAuthorization(core, evaluator, "CompleteAuthorization", {
+      signer: evaluator.address,
+      jobId,
+      reason,
+      optParamsHash: hashBytes(optParams),
+      nonce: nonce(5),
+      deadline,
+    });
+    await core.connect(relayer).completeWithAuthorization(jobId, reason, optParams, {
+      signer: evaluator.address,
+      nonce: nonce(5),
+      deadline,
+      sig: completeSig,
+    });
 
     expect((await core.getJob(jobId)).status).to.equal(3n);
     expect(await usdc.balanceOf(provider.address)).to.equal(TWENTY_USDC);

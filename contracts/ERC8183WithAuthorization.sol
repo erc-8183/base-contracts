@@ -23,6 +23,9 @@ contract ERC8183WithAuthorization is ERC8183, EIP712Upgradeable {
     bytes32 public constant SUBMIT_AUTHORIZATION_TYPEHASH = keccak256(
         "SubmitAuthorization(address signer,uint256 jobId,bytes32 deliverable,bytes32 optParamsHash,bytes32 nonce,uint256 deadline)"
     );
+    bytes32 public constant COMPLETE_AUTHORIZATION_TYPEHASH = keccak256(
+        "CompleteAuthorization(address signer,uint256 jobId,bytes32 reason,bytes32 optParamsHash,bytes32 nonce,uint256 deadline)"
+    );
     bytes32 public constant REJECT_AUTHORIZATION_TYPEHASH = keccak256(
         "RejectAuthorization(address signer,uint256 jobId,bytes32 reason,bytes32 optParamsHash,bytes32 nonce,uint256 deadline)"
     );
@@ -175,6 +178,24 @@ contract ERC8183WithAuthorization is ERC8183, EIP712Upgradeable {
             auth.sig
         );
         _submit(auth.signer, jobId, deliverable, optParams);
+    }
+
+    function completeWithAuthorization(
+        uint256 jobId,
+        bytes32 reason,
+        bytes calldata optParams,
+        Authorization calldata auth
+    ) external whenNotPaused nonReentrant {
+        _verifyAuthorization(
+            auth.signer,
+            auth.nonce,
+            auth.deadline,
+            keccak256(
+                abi.encode(COMPLETE_AUTHORIZATION_TYPEHASH, auth.signer, jobId, reason, keccak256(optParams), auth.nonce, auth.deadline)
+            ),
+            auth.sig
+        );
+        _complete(auth.signer, jobId, reason, optParams);
     }
 
     function rejectWithAuthorization(
