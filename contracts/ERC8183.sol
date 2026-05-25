@@ -229,7 +229,11 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     }
 
     /// @notice Initializes the proxy with treasury and admin
-    function initialize(address treasury_, address admin_) public initializer {
+    function initialize(address treasury_, address admin_) public virtual initializer {
+        __ERC8183_init(treasury_, admin_);
+    }
+
+    function __ERC8183_init(address treasury_, address admin_) internal onlyInitializing {
         if (treasury_ == address(0) || admin_ == address(0)) revert ZeroAddress();
         __AccessControl_init();
         __Pausable_init();
@@ -387,8 +391,21 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         address hook,
         uint256 providerAgentId
     ) external whenNotPaused nonReentrant returns (uint256) {
+        return _createJob(msg.sender, provider, evaluator, expiredAt, description, hook, providerAgentId);
+    }
+
+    function _createJob(
+        address client,
+        address provider,
+        address evaluator,
+        uint48 expiredAt,
+        string calldata description,
+        address hook,
+        uint256 providerAgentId
+    ) internal returns (uint256) {
+        if (client == address(0)) revert ZeroAddress();
         if (expiredAt <= block.timestamp + 5 minutes) revert ExpiryTooShort();
-        if (msg.sender == provider) revert ClientCannotBeProvider();
+        if (client == provider) revert ClientCannotBeProvider();
         if (evaluator == address(0)) revert ZeroAddress();
         if (evaluator != address(0) && evaluator == provider) revert ProviderCannotBeEvaluator();
         if (!whitelistedHooks[hook]) revert HookNotWhitelisted();
@@ -403,7 +420,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
 
         uint256 jobId = ++jobCounter;
         jobs[jobId] = Job({
-            client: msg.sender,
+            client: client,
             status: JobStatus.Open,
             provider: provider,
             expiredAt: expiredAt,
@@ -418,7 +435,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
 
         emit JobCreated(
             jobId,
-            msg.sender,
+            client,
             provider,
             evaluator,
             expiredAt,
@@ -432,11 +449,15 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     /// @param jobId The job to assign a provider to
     /// @param provider_ The provider address
     function setProvider(uint256 jobId, address provider_, uint256 agentId) external whenNotPaused {
+        _setProvider(msg.sender, jobId, provider_, agentId);
+    }
+
+    function _setProvider(address actor, uint256 jobId, address provider_, uint256 agentId) internal {
         Job storage job = jobs[jobId];
         if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
         if (block.timestamp >= job.expiredAt) revert WrongStatus();
-        if (msg.sender != job.client) revert Unauthorized();
+        if (actor != job.client) revert Unauthorized();
         if (job.provider != address(0)) revert WrongStatus();
         if (provider_ == address(0)) revert ZeroAddress();
         if (provider_ == job.evaluator) revert ProviderCannotBeEvaluator();
@@ -456,22 +477,32 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         uint256 amount,
         bytes calldata optParams
     ) external whenNotPaused nonReentrant {
+        _setBudget(msg.sender, jobId, token, amount, optParams);
+    }
+
+    function _setBudget(
+        address actor,
+        uint256 jobId,
+        address token,
+        uint256 amount,
+        bytes calldata optParams
+    ) internal {
         Job storage job = jobs[jobId];
         if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
         if (block.timestamp >= job.expiredAt) revert WrongStatus();
-        if (msg.sender != job.provider) revert Unauthorized();
+        if (actor != job.provider) revert Unauthorized();
         if (token == address(0)) revert ZeroAddress();
         if (!allowedPaymentTokens[token]) revert PaymentTokenNotAllowed();
 
-        bytes memory data = abi.encode(msg.sender, token, amount, optParams);
-        _beforeHook(job.hook, jobId, msg.sig, data);
+        bytes memory data = abi.encode(actor, token, amount, optParams);
+        _beforeHook(job.hook, jobId, this.setBudget.selector, data);
 
         job.paymentToken = token;
         job.budget = amount;
         emit BudgetSet(jobId, token, amount);
 
-        _afterHook(job.hook, jobId, msg.sig, data);
+        _afterHook(job.hook, jobId, this.setBudget.selector, data);
     }
 
     /// @notice Client funds the job escrow. Transitions Open -> Funded.
@@ -483,16 +514,25 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         uint256 expectedBudget,
         bytes calldata optParams
     ) external whenNotPaused nonReentrant {
+        _fund(msg.sender, jobId, expectedBudget, optParams);
+    }
+
+    function _fund(
+        address actor,
+        uint256 jobId,
+        uint256 expectedBudget,
+        bytes calldata optParams
+    ) internal {
         Job storage job = jobs[jobId];
         if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
-        if (msg.sender != job.client) revert Unauthorized();
+        if (actor != job.client) revert Unauthorized();
         if (job.provider == address(0)) revert ProviderNotSet();
         if (block.timestamp >= job.expiredAt) revert WrongStatus();
         if (job.budget != expectedBudget) revert BudgetMismatch();
 
-        bytes memory data = abi.encode(msg.sender, optParams);
-        _beforeHook(job.hook, jobId, msg.sig, data);
+        bytes memory data = abi.encode(actor, optParams);
+        _beforeHook(job.hook, jobId, this.fund.selector, data);
 
         job.status = JobStatus.Funded;
         if (job.budget > 0) {
@@ -500,13 +540,13 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
             // Snapshot balance and assert delta == budget after transfer to reject
             // fee-on-transfer and rebasing tokens that would leave escrow short.
             uint256 balanceBefore = token.balanceOf(address(this));
-            token.safeTransferFrom(job.client, address(this), job.budget);
+            token.safeTransferFrom(actor, address(this), job.budget);
             uint256 received = token.balanceOf(address(this)) - balanceBefore;
             if (received != job.budget) revert UnexpectedFundedAmount();
         }
-        emit JobFunded(jobId, job.client, job.budget);
+        emit JobFunded(jobId, actor, job.budget);
 
-        _afterHook(job.hook, jobId, msg.sig, data);
+        _afterHook(job.hook, jobId, this.fund.selector, data);
     }
 
     /// @notice Provider submits work. Transitions Funded -> Submitted (with evaluator)
@@ -518,6 +558,15 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         bytes32 deliverable,
         bytes calldata optParams
     ) external whenNotPaused nonReentrant {
+        _submit(msg.sender, jobId, deliverable, optParams);
+    }
+
+    function _submit(
+        address actor,
+        uint256 jobId,
+        bytes32 deliverable,
+        bytes calldata optParams
+    ) internal {
         Job storage job = jobs[jobId];
         if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (
@@ -525,16 +574,16 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
             (job.status != JobStatus.Open || job.budget > 0) // Allow Open job with 0 budget to be submitted
         ) revert WrongStatus();
         if (job.expiredAt != 0 && block.timestamp >= job.expiredAt) revert WrongStatus();
-        if (msg.sender != job.provider) revert Unauthorized();
+        if (actor != job.provider) revert Unauthorized();
 
-        bytes memory data = abi.encode(msg.sender, deliverable, optParams);
-        _beforeHook(job.hook, jobId, msg.sig, data);
+        bytes memory data = abi.encode(actor, deliverable, optParams);
+        _beforeHook(job.hook, jobId, this.submit.selector, data);
 
         job.status = JobStatus.Submitted;
         job.submittedAt = uint48(block.timestamp);
-        emit JobSubmitted(jobId, job.provider, deliverable);
+        emit JobSubmitted(jobId, actor, deliverable);
 
-        _afterHook(job.hook, jobId, msg.sig, data);
+        _afterHook(job.hook, jobId, this.submit.selector, data);
     }
 
     /// @notice Evaluator approves the submission. Transitions Submitted -> Completed.
@@ -593,21 +642,30 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         bytes32 reason,
         bytes calldata optParams
     ) external whenNotPaused nonReentrant {
+        _reject(msg.sender, jobId, reason, optParams);
+    }
+
+    function _reject(
+        address actor,
+        uint256 jobId,
+        bytes32 reason,
+        bytes calldata optParams
+    ) internal {
         Job storage job = jobs[jobId];
         if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
 
         if (job.status == JobStatus.Open) {
-            if (msg.sender != job.client && msg.sender != job.provider) revert Unauthorized();
+            if (actor != job.client && actor != job.provider) revert Unauthorized();
         } else if (
             job.status == JobStatus.Funded || job.status == JobStatus.Submitted
         ) {
-            if (msg.sender != job.evaluator) revert Unauthorized();
+            if (actor != job.evaluator) revert Unauthorized();
         } else {
             revert WrongStatus();
         }
 
-        bytes memory data = abi.encode(msg.sender, reason, optParams);
-        _beforeHook(job.hook, jobId, msg.sig, data);
+        bytes memory data = abi.encode(actor, reason, optParams);
+        _beforeHook(job.hook, jobId, this.reject.selector, data);
 
         JobStatus prev = job.status;
         job.status = JobStatus.Rejected;
@@ -620,9 +678,9 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
             emit Refunded(jobId, job.client, job.budget);
         }
 
-        emit JobRejected(jobId, msg.sender, reason);
+        emit JobRejected(jobId, actor, reason);
 
-        _afterHook(job.hook, jobId, msg.sig, data);
+        _afterHook(job.hook, jobId, this.reject.selector, data);
     }
 
     /// @notice Claims a refund for an expired job. Anyone can call.
