@@ -30,6 +30,9 @@ interface IERC8183Hook is IERC165 {
 | `setBudget`   | Yes     | before + after |
 | `fund`        | Yes     | before + after |
 | `submit`      | Yes     | before + after |
+| `submitClaim` | Yes     | before + after |
+| `approveClaim` | Yes   | before + after |
+| `rejectClaim` | Yes    | before + after |
 | `complete`    | Yes     | before + after |
 | `reject`      | Yes     | before + after |
 | `claimRefund` | **No**  | Permissionless safety mechanism — never hookable. |
@@ -43,6 +46,9 @@ As produced by `ERC8183`:
 | `setBudget` | `abi.encode(address caller, address token, uint256 amount, bytes optParams)` |
 | `fund`      | `abi.encode(address caller, bytes optParams)`                                |
 | `submit`    | `abi.encode(address caller, bytes32 deliverable, bytes optParams)`           |
+| `submitClaim` | `abi.encode(address caller, uint256 cumulativeAmount, bytes32 deliverable, bytes optParams)` |
+| `approveClaim` | `abi.encode(address caller, uint256 cumulativeAmount, bytes32 deliverable, bytes optParams)` |
+| `rejectClaim` | `abi.encode(address caller, uint256 cumulativeAmount, bytes32 deliverable, bytes32 reason, bytes optParams)` |
 | `complete`  | `abi.encode(address caller, bytes32 reason, bytes optParams)`                |
 | `reject`    | `abi.encode(address caller, bytes32 reason, bytes optParams)`                |
 

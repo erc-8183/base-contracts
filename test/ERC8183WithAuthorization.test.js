@@ -7,6 +7,7 @@ const {
 
 describe("ERC8183WithAuthorization", function () {
   const TWENTY_USDC = 20_000_000n;
+  const TEN_USDC = 10_000_000n;
   const MAX_UINT72 = (1n << 72n) - 1n;
 
   async function deployFixture() {
@@ -94,6 +95,34 @@ describe("ERC8183WithAuthorization", function () {
         { name: "nonce", type: "uint72" },
         { name: "deadline", type: "uint256" },
       ],
+      SubmitClaimAuthorization: [
+        { name: "signer", type: "address" },
+        { name: "jobId", type: "uint256" },
+        { name: "cumulativeAmount", type: "uint256" },
+        { name: "deliverable", type: "bytes32" },
+        { name: "optParamsHash", type: "bytes32" },
+        { name: "nonce", type: "uint72" },
+        { name: "deadline", type: "uint256" },
+      ],
+      ApproveClaimAuthorization: [
+        { name: "signer", type: "address" },
+        { name: "jobId", type: "uint256" },
+        { name: "cumulativeAmount", type: "uint256" },
+        { name: "deliverable", type: "bytes32" },
+        { name: "optParamsHash", type: "bytes32" },
+        { name: "nonce", type: "uint72" },
+        { name: "deadline", type: "uint256" },
+      ],
+      RejectClaimAuthorization: [
+        { name: "signer", type: "address" },
+        { name: "jobId", type: "uint256" },
+        { name: "cumulativeAmount", type: "uint256" },
+        { name: "deliverable", type: "bytes32" },
+        { name: "reason", type: "bytes32" },
+        { name: "optParamsHash", type: "bytes32" },
+        { name: "nonce", type: "uint72" },
+        { name: "deadline", type: "uint256" },
+      ],
     };
     return signerWallet.signTypedData(domain, { [typeName]: types[typeName] }, value);
   }
@@ -110,6 +139,14 @@ describe("ERC8183WithAuthorization", function () {
   function hashString(value) {
     return ethers.keccak256(ethers.toUtf8Bytes(value));
   }
+
+  const claimBindingHash = (amount, deliverable, optParams = "0x") =>
+    ethers.keccak256(
+      ethers.AbiCoder.defaultAbiCoder().encode(
+        ["uint256", "bytes32", "bytes32"],
+        [amount, deliverable, ethers.keccak256(optParams)]
+      )
+    );
 
   it("relays a full signed job flow", async function () {
     const { usdc, core, client, provider, evaluator, relayer } = await loadFixture(deployFixture);
@@ -228,6 +265,78 @@ describe("ERC8183WithAuthorization", function () {
 
     expect((await core.getJob(jobId)).status).to.equal(3n);
     expect(await usdc.balanceOf(provider.address)).to.equal(TWENTY_USDC);
+  });
+
+  it("relays a client-authorized nonzero claim into pending state and approval", async function () {
+    const { usdc, core, client, provider, evaluator, relayer } = await loadFixture(deployFixture);
+    const expiry = (await time.latest()) + 3600;
+    const deadline = (await time.latest()) + 7200;
+    const optParams = "0x1234";
+    const deliverable = ethers.encodeBytes32String("milestone-1");
+    const usdcAddr = await usdc.getAddress();
+
+    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "claim auth job", ethers.ZeroAddress, 0);
+    const jobId = 1n;
+    await core.connect(provider).setBudget(jobId, usdcAddr, TWENTY_USDC, "0x");
+    await core.connect(client).fund(jobId, TWENTY_USDC, "0x");
+
+    const submitClaimSig = await signAuthorization(core, client, "SubmitClaimAuthorization", {
+      signer: client.address,
+      jobId,
+      cumulativeAmount: TEN_USDC,
+      deliverable,
+      optParamsHash: hashBytes(optParams),
+      nonce: 21n,
+      deadline,
+    });
+
+    await expect(core.connect(relayer).submitClaimWithAuthorization(
+      jobId,
+      TEN_USDC,
+      deliverable,
+      optParams,
+      {
+        signer: client.address,
+        nonce: 21n,
+        deadline,
+        sig: submitClaimSig,
+      },
+    ))
+      .to.emit(core, "AuthorizationUsed").withArgs(client.address, packedNonce(client.address, 21n))
+      .to.emit(core, "ClaimSubmitted").withArgs(jobId, client.address, TEN_USDC, TEN_USDC, deliverable);
+
+    expect((await core.getJob(jobId)).settledAmount).to.equal(0n);
+    expect(await core.pendingClaimHash(jobId)).to.equal(claimBindingHash(TEN_USDC, deliverable, optParams));
+    expect(await usdc.balanceOf(provider.address)).to.equal(0n);
+
+    const approveClaimSig = await signAuthorization(core, evaluator, "ApproveClaimAuthorization", {
+      signer: evaluator.address,
+      jobId,
+      cumulativeAmount: TEN_USDC,
+      deliverable,
+      optParamsHash: hashBytes(optParams),
+      nonce: 22n,
+      deadline,
+    });
+
+    await expect(core.connect(relayer).approveClaimWithAuthorization(
+      jobId,
+      TEN_USDC,
+      deliverable,
+      optParams,
+      {
+        signer: evaluator.address,
+        nonce: 22n,
+        deadline,
+        sig: approveClaimSig,
+      },
+    ))
+      .to.emit(core, "AuthorizationUsed").withArgs(evaluator.address, packedNonce(evaluator.address, 22n))
+      .to.emit(core, "ClaimApproved").withArgs(jobId, evaluator.address, TEN_USDC, TEN_USDC, deliverable);
+
+    expect((await core.getJob(jobId)).settledAmount).to.equal(TEN_USDC);
+    expect(await core.pendingClaimHash(jobId)).to.equal(ethers.ZeroHash);
+    expect(await usdc.balanceOf(provider.address)).to.equal(TEN_USDC);
   });
 
   it("rejects replayed, expired, and tampered authorizations", async function () {

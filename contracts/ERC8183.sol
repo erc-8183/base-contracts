@@ -11,6 +11,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import "./IERC8183Hook.sol";
 import "@openzeppelin/contracts/utils/introspection/ERC165Checker.sol";
+import "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
 
 /**
  * @title ERC8183
@@ -24,7 +25,7 @@ import "@openzeppelin/contracts/utils/introspection/ERC165Checker.sol";
  *
  *      When hook == address(0), the contract operates as a standalone job escrow.
  */
-contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable, ReentrancyGuardTransient, UUPSUpgradeable {
+contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable, ReentrancyGuardTransient, UUPSUpgradeable, EIP712Upgradeable {
     using SafeERC20 for IERC20;
 
     /// @notice Job lifecycle states
@@ -49,6 +50,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     /// @param paymentToken     ERC-20 token used for job payment
     /// @param providerAgentId  Optional ERC-8004 agent identity for provider
     /// @param description      Human-readable job description
+    /// @param settledAmount    Cumulative gross amount released via claim settlements
     struct Job {
         address client;             // 20 ──┐ slot 1
         JobStatus status;           // 1  ──┘
@@ -61,9 +63,12 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         address paymentToken;       // 20 ──  slot 6
         uint256 providerAgentId;    // 32 ──  slot 7
         string description;         //        slot 8+
+        uint256 settledAmount;      // 32 ──  slot 9
     }
 
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
+    string private constant EIP712_NAME = "ERC8183";
+    string private constant EIP712_VERSION = "1";
 
     /// @notice Grace period after expiry during which only the evaluator can finalize a Submitted job.
     ///         Prevents third-party censorship of providers who submitted work before expiry.
@@ -87,6 +92,10 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     ///         (no fee-on-transfer, no rebase, no transfer hooks, no pause/blacklist
     ///         that would lock escrowed funds) can be used for job budgets.
     mapping(address => bool) public allowedPaymentTokens;
+    /// @notice Job ID -> hash binding the pending nonzero-deliverable claim.
+    mapping(uint256 => bytes32) public pendingClaimHash;
+    /// @notice Job ID -> claim hash -> whether the claim hash has already been submitted.
+    mapping(uint256 => mapping(bytes32 => bool)) public submittedClaimHash;
 
     /// @notice Emitted when a new job is created
     event JobCreated(
@@ -161,6 +170,34 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         address indexed client,
         uint256 amount
     );
+    /// @notice Emitted on each successful partial settlement
+    event Settled(
+        uint256 indexed jobId,
+        uint256 cumulativeAmount,
+        uint256 delta
+    );
+    /// @notice Emitted when a provider submits a claim against a funded job
+    event ClaimSubmitted(
+        uint256 indexed jobId,
+        address indexed provider,
+        uint256 cumulativeAmount,
+        uint256 delta,
+        bytes32 deliverable
+    );
+    /// @notice Emitted when a pending claim is approved by the client or evaluator
+    event ClaimApproved(
+        uint256 indexed jobId,
+        address indexed approver,
+        uint256 cumulativeAmount,
+        uint256 delta,
+        bytes32 deliverable
+    );
+    /// @notice Emitted when a pending claim is rejected by the client or evaluator
+    event ClaimRejected(
+        uint256 indexed jobId,
+        address indexed rejector,
+        bytes32 reason
+    );
     /// @notice Emitted when a hook's whitelist status changes
     event HookWhitelistUpdated(
         address indexed hook,
@@ -222,6 +259,14 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     error PaymentTokenNotAllowed();
     /// @notice Thrown when funded amount received differs from expected (fee-on-transfer / rebasing tokens)
     error UnexpectedFundedAmount();
+    /// @notice Thrown when a claim does not advance the cumulative amount
+    error NoNewSettlement();
+    /// @notice Thrown when cumulative settlement would exceed the job budget
+    error ExceedsBudget();
+    /// @notice Thrown when submitting a nonzero-deliverable claim hash that was already submitted
+    error ClaimAlreadySubmitted();
+    /// @notice Thrown when approveClaim/rejectClaim is called with no matching pending claim
+    error NoPendingClaim();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -230,13 +275,19 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
 
     /// @notice Initializes the proxy with treasury and admin
     function initialize(address treasury_, address admin_) public virtual initializer {
-        __ERC8183_init(treasury_, admin_);
+        __ERC8183_init(treasury_, admin_, EIP712_NAME, EIP712_VERSION);
     }
 
-    function __ERC8183_init(address treasury_, address admin_) internal onlyInitializing {
+    function __ERC8183_init(
+        address treasury_,
+        address admin_,
+        string memory eip712Name_,
+        string memory eip712Version_
+    ) internal onlyInitializing {
         if (treasury_ == address(0) || admin_ == address(0)) revert ZeroAddress();
         __AccessControl_init();
         __Pausable_init();
+        __EIP712_init(eip712Name_, eip712Version_);
         platformTreasury = treasury_;
         _grantRole(DEFAULT_ADMIN_ROLE, admin_);
         _grantRole(ADMIN_ROLE, admin_);
@@ -430,7 +481,8 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
             hook: hook,
             paymentToken: address(0),
             providerAgentId: provider != address(0) ? providerAgentId : 0,
-            description: description
+            description: description,
+            settledAmount: 0
         });
 
         emit JobCreated(
@@ -615,7 +667,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
 
         job.status = JobStatus.Completed;
 
-        uint256 amount = job.budget;
+        uint256 amount = job.budget - job.settledAmount;
         uint256 platformFee = (amount * platformFeeBP) / 10000;
         uint256 evalFee = (amount * evaluatorFeeBP) / 10000;
         uint256 net = amount - platformFee - evalFee;
@@ -679,12 +731,13 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         JobStatus prev = job.status;
         job.status = JobStatus.Rejected;
 
+        uint256 refundAmount = job.budget - job.settledAmount;
         if (
             (prev == JobStatus.Funded || prev == JobStatus.Submitted) &&
-            job.budget > 0
+            refundAmount > 0
         ) {
-            IERC20(job.paymentToken).safeTransfer(job.client, job.budget);
-            emit Refunded(jobId, job.client, job.budget);
+            IERC20(job.paymentToken).safeTransfer(job.client, refundAmount);
+            emit Refunded(jobId, job.client, refundAmount);
         }
 
         emit JobRejected(jobId, actor, reason);
@@ -710,12 +763,168 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         JobStatus prev = job.status;
         job.status = JobStatus.Expired;
 
-        if (job.budget > 0 && (prev == JobStatus.Funded || prev == JobStatus.Submitted)) {
-            IERC20(job.paymentToken).safeTransfer(job.client, job.budget);
-            emit Refunded(jobId, job.client, job.budget);
+        uint256 refundAmount = job.budget - job.settledAmount;
+        if (refundAmount > 0 && (prev == JobStatus.Funded || prev == JobStatus.Submitted)) {
+            IERC20(job.paymentToken).safeTransfer(job.client, refundAmount);
+            emit Refunded(jobId, job.client, refundAmount);
         }
 
         emit JobExpired(jobId);
+    }
+
+    function _distributeSettlement(
+        uint256 jobId,
+        Job storage job,
+        uint256 delta
+    ) internal {
+        uint256 platformFee = (delta * platformFeeBP) / 10000;
+        uint256 evalFee = (delta * evaluatorFeeBP) / 10000;
+        uint256 net = delta - platformFee - evalFee;
+
+        IERC20 token = IERC20(job.paymentToken);
+        if (platformFee > 0) {
+            token.safeTransfer(platformTreasury, platformFee);
+            emit PlatformFeePaid(jobId, platformTreasury, platformFee);
+        }
+        if (evalFee > 0) {
+            token.safeTransfer(job.evaluator, evalFee);
+            emit EvaluatorFeePaid(jobId, job.evaluator, evalFee);
+        }
+        if (net > 0) {
+            token.safeTransfer(job.provider, net);
+        }
+        emit PaymentReleased(jobId, job.provider, net);
+    }
+
+    function _claimHash(
+        uint256 cumulativeAmount,
+        bytes32 deliverable,
+        bytes32 optParamsHash
+    ) internal pure returns (bytes32) {
+        return keccak256(abi.encode(cumulativeAmount, deliverable, optParamsHash));
+    }
+
+    /// @notice Client submits and approves a claim against a funded job.
+    function submitClaim(
+        uint256 jobId,
+        uint256 cumulativeAmount,
+        bytes32 deliverable,
+        bytes calldata optParams
+    ) external whenNotPaused nonReentrant {
+        _submitClaim(msg.sender, jobId, cumulativeAmount, deliverable, optParams);
+    }
+
+    function _submitClaim(
+        address actor,
+        uint256 jobId,
+        uint256 cumulativeAmount,
+        bytes32 deliverable,
+        bytes calldata optParams
+    ) internal {
+        Job storage job = jobs[jobId];
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
+        if (actor != job.client) revert Unauthorized();
+        if (job.status != JobStatus.Funded) revert WrongStatus();
+        if (block.timestamp >= job.expiredAt) revert WrongStatus();
+        if (cumulativeAmount <= job.settledAmount) revert NoNewSettlement();
+        if (cumulativeAmount > job.budget) revert ExceedsBudget();
+
+        uint256 delta = cumulativeAmount - job.settledAmount;
+        bytes memory data = abi.encode(actor, cumulativeAmount, deliverable, optParams);
+        _beforeHook(job.hook, jobId, this.submitClaim.selector, data);
+
+        if (deliverable == bytes32(0)) {
+            job.settledAmount = cumulativeAmount;
+            _distributeSettlement(jobId, job, delta);
+            emit Settled(jobId, cumulativeAmount, delta);
+        } else {
+            bytes32 claimHash = _claimHash(cumulativeAmount, deliverable, keccak256(optParams));
+            if (submittedClaimHash[jobId][claimHash]) revert ClaimAlreadySubmitted();
+            submittedClaimHash[jobId][claimHash] = true;
+            pendingClaimHash[jobId] = claimHash;
+        }
+
+        emit ClaimSubmitted(jobId, actor, cumulativeAmount, delta, deliverable);
+        _afterHook(job.hook, jobId, this.submitClaim.selector, data);
+    }
+
+    /// @notice Client or evaluator approves a pending nonzero-deliverable claim.
+    function approveClaim(
+        uint256 jobId,
+        uint256 cumulativeAmount,
+        bytes32 deliverable,
+        bytes calldata optParams
+    ) external whenNotPaused nonReentrant {
+        _approveClaim(msg.sender, jobId, cumulativeAmount, deliverable, optParams);
+    }
+
+    function _approveClaim(
+        address actor,
+        uint256 jobId,
+        uint256 cumulativeAmount,
+        bytes32 deliverable,
+        bytes calldata optParams
+    ) internal {
+        Job storage job = jobs[jobId];
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
+        if (actor != job.client && actor != job.evaluator) revert Unauthorized();
+        if (job.status != JobStatus.Funded) revert WrongStatus();
+
+        bytes32 stored = pendingClaimHash[jobId];
+        if (stored == bytes32(0)) revert NoPendingClaim();
+        if (stored != _claimHash(cumulativeAmount, deliverable, keccak256(optParams))) revert NoPendingClaim();
+        if (cumulativeAmount <= job.settledAmount) revert NoNewSettlement();
+        if (cumulativeAmount > job.budget) revert ExceedsBudget();
+
+        uint256 delta = cumulativeAmount - job.settledAmount;
+        bytes memory data = abi.encode(actor, cumulativeAmount, deliverable, optParams);
+        _beforeHook(job.hook, jobId, this.approveClaim.selector, data);
+
+        delete pendingClaimHash[jobId];
+        job.settledAmount = cumulativeAmount;
+        _distributeSettlement(jobId, job, delta);
+
+        emit Settled(jobId, cumulativeAmount, delta);
+        emit ClaimApproved(jobId, actor, cumulativeAmount, delta, deliverable);
+
+        _afterHook(job.hook, jobId, this.approveClaim.selector, data);
+    }
+
+    /// @notice Client or evaluator rejects a pending nonzero-deliverable claim.
+    function rejectClaim(
+        uint256 jobId,
+        uint256 cumulativeAmount,
+        bytes32 deliverable,
+        bytes32 reason,
+        bytes calldata optParams
+    ) external whenNotPaused nonReentrant {
+        _rejectClaim(msg.sender, jobId, cumulativeAmount, deliverable, reason, optParams);
+    }
+
+    function _rejectClaim(
+        address actor,
+        uint256 jobId,
+        uint256 cumulativeAmount,
+        bytes32 deliverable,
+        bytes32 reason,
+        bytes calldata optParams
+    ) internal {
+        Job storage job = jobs[jobId];
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
+        if (actor != job.client && actor != job.evaluator) revert Unauthorized();
+        if (job.status != JobStatus.Funded) revert WrongStatus();
+
+        bytes32 stored = pendingClaimHash[jobId];
+        if (stored == bytes32(0)) revert NoPendingClaim();
+        if (stored != _claimHash(cumulativeAmount, deliverable, keccak256(optParams))) revert NoPendingClaim();
+
+        bytes memory data = abi.encode(actor, cumulativeAmount, deliverable, reason, optParams);
+        _beforeHook(job.hook, jobId, this.rejectClaim.selector, data);
+
+        delete pendingClaimHash[jobId];
+        emit ClaimRejected(jobId, actor, reason);
+
+        _afterHook(job.hook, jobId, this.rejectClaim.selector, data);
     }
 
     // ──────────────────── View ────────────────────

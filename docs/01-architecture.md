@@ -12,6 +12,10 @@ stateDiagram-v2
     Open --> Expired: claimRefund()\n[after expiry]\n(no escrow to refund)
 
     Funded --> Submitted: submit(deliverable)\n[provider only]
+    Funded --> Funded: submitClaim(bytes32(0))\n[client direct or client authorization]\n💸 delta released
+    Funded --> Funded: submitClaim(nonzero deliverable)\n[client direct or client authorization]\npending claim
+    Funded --> Funded: approveClaim()\n[client/evaluator direct or authorization]\n💸 delta released
+    Funded --> Funded: rejectClaim()\n[client/evaluator direct or authorization]\npending cleared
     Funded --> Rejected: reject()\n[evaluator only]\n↩️ client refunded
     Funded --> Expired: claimRefund()\n[after expiry]\n↩️ client refunded
 
@@ -24,7 +28,9 @@ stateDiagram-v2
     Expired --> [*]
 ```
 
-After expiry, `claimRefund` is callable by anyone. For `Submitted` jobs, it is gated by an additional `EVALUATION_GRACE_PERIOD` (1 hour) so that an evaluator who is mid-review cannot be censored by a third-party refund call.
+`submitClaim` is an incremental settlement path while the job remains `Funded`. In the direct flow, the client sends the transaction, so no voucher signature is required. In the relayed flow, `ERC8183WithAuthorization.submitClaimWithAuthorization` carries the client's EIP-712 authorization signature for the same claim parameters. A zero deliverable releases the new delta immediately. A nonzero deliverable records a pending claim hash; the client or evaluator then approves or rejects it, directly or through `approveClaimWithAuthorization` / `rejectClaimWithAuthorization`.
+
+After expiry, `claimRefund` is callable by anyone. For `Submitted` jobs, it is gated by an additional `EVALUATION_GRACE_PERIOD` (1 hour) so that an evaluator who is mid-review cannot be censored by a third-party refund call. Refunds and final completion only use the unsettled escrow balance, so funds released by claims are not double-paid or double-refunded.
 
 ## Sequence — Typical Job Flow (No Hook)
 
@@ -48,6 +54,28 @@ sequenceDiagram
     E->>AC: complete(jobId, reason, "0x")
     Note over AC: 💸 platform fee → treasury<br/>💸 evaluator fee → evaluator<br/>💸 net → provider
     Note over AC: Status: Completed
+```
+
+## Sequence — Claim Settlement
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant AC as ERC8183
+    participant E as Evaluator
+
+    Note over AC: Status: Funded
+    C->>AC: submitClaim(jobId, cumulativeAmount, deliverable, optParams)
+
+    alt deliverable == bytes32(0)
+        Note over AC: 💸 delta released
+    else deliverable != bytes32(0)
+        Note over AC: pending claim hash stored
+        E->>AC: approveClaim(jobId, cumulativeAmount, deliverable, optParams)
+        Note over AC: 💸 delta released
+    end
+
+    Note over C,AC: Relayed variant: client signs SubmitClaimAuthorization,<br/>relayer calls submitClaimWithAuthorization(...)
 ```
 
 ## Sequence — Job with Hook

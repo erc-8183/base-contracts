@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
 import "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
 import "./ERC8183.sol";
 
 /// @title ERC8183WithAuthorization
 /// @notice Adds EIP-712 signed authorization entrypoints to ERC8183.
-contract ERC8183WithAuthorization is ERC8183, EIP712Upgradeable {
+contract ERC8183WithAuthorization is ERC8183 {
     bytes32 public constant CREATE_JOB_AUTHORIZATION_TYPEHASH = keccak256(
         "CreateJobAuthorization(address signer,address provider,address evaluator,uint48 expiredAt,bytes32 descriptionHash,address hook,uint256 providerAgentId,uint72 nonce,uint256 deadline)"
     );
@@ -28,6 +27,15 @@ contract ERC8183WithAuthorization is ERC8183, EIP712Upgradeable {
     );
     bytes32 public constant REJECT_AUTHORIZATION_TYPEHASH = keccak256(
         "RejectAuthorization(address signer,uint256 jobId,bytes32 reason,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
+    );
+    bytes32 private constant SUBMIT_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
+        "SubmitClaimAuthorization(address signer,uint256 jobId,uint256 cumulativeAmount,bytes32 deliverable,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
+    );
+    bytes32 private constant APPROVE_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
+        "ApproveClaimAuthorization(address signer,uint256 jobId,uint256 cumulativeAmount,bytes32 deliverable,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
+    );
+    bytes32 private constant REJECT_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
+        "RejectClaimAuthorization(address signer,uint256 jobId,uint256 cumulativeAmount,bytes32 deliverable,bytes32 reason,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
 
     /// @notice Tracks used packed nonces: bytes20(signer) || uint72 nonce.
@@ -56,8 +64,7 @@ contract ERC8183WithAuthorization is ERC8183, EIP712Upgradeable {
     error InvalidAuthorizationSignature();
 
     function initialize(address treasury_, address admin_) public override initializer {
-        __ERC8183_init(treasury_, admin_);
-        __EIP712_init("ERC8183WithAuthorization", "1");
+        __ERC8183_init(treasury_, admin_, "ERC8183WithAuthorization", "1");
     }
 
     function DOMAIN_SEPARATOR() external view returns (bytes32) {
@@ -215,6 +222,92 @@ contract ERC8183WithAuthorization is ERC8183, EIP712Upgradeable {
             auth.sig
         );
         _reject(auth.signer, jobId, reason, optParams);
+    }
+
+    function submitClaimWithAuthorization(
+        uint256 jobId,
+        uint256 cumulativeAmount,
+        bytes32 deliverable,
+        bytes calldata optParams,
+        Authorization calldata auth
+    ) external whenNotPaused nonReentrant {
+        _verifyAuthorization(
+            auth.signer,
+            auth.nonce,
+            auth.deadline,
+            keccak256(
+                abi.encode(
+                    SUBMIT_CLAIM_AUTHORIZATION_TYPEHASH,
+                    auth.signer,
+                    jobId,
+                    cumulativeAmount,
+                    deliverable,
+                    keccak256(optParams),
+                    auth.nonce,
+                    auth.deadline
+                )
+            ),
+            auth.sig
+        );
+        _submitClaim(auth.signer, jobId, cumulativeAmount, deliverable, optParams);
+    }
+
+    function approveClaimWithAuthorization(
+        uint256 jobId,
+        uint256 cumulativeAmount,
+        bytes32 deliverable,
+        bytes calldata optParams,
+        Authorization calldata auth
+    ) external whenNotPaused nonReentrant {
+        _verifyAuthorization(
+            auth.signer,
+            auth.nonce,
+            auth.deadline,
+            keccak256(
+                abi.encode(
+                    APPROVE_CLAIM_AUTHORIZATION_TYPEHASH,
+                    auth.signer,
+                    jobId,
+                    cumulativeAmount,
+                    deliverable,
+                    keccak256(optParams),
+                    auth.nonce,
+                    auth.deadline
+                )
+            ),
+            auth.sig
+        );
+        _approveClaim(auth.signer, jobId, cumulativeAmount, deliverable, optParams);
+    }
+
+    function rejectClaimWithAuthorization(
+        uint256 jobId,
+        uint256 cumulativeAmount,
+        bytes32 deliverable,
+        bytes32 reason,
+        bytes calldata optParams,
+        Authorization calldata auth
+    ) external whenNotPaused nonReentrant {
+        _verifyAuthorization(
+            auth.signer,
+            auth.nonce,
+            auth.deadline,
+            keccak256(
+                abi.encode(
+                    REJECT_CLAIM_AUTHORIZATION_TYPEHASH,
+                    auth.signer,
+                    jobId,
+                    cumulativeAmount,
+                    deliverable,
+                    reason,
+                    keccak256(optParams),
+                    auth.nonce,
+                    auth.deadline
+                )
+            ),
+            auth.sig
+        );
+        _rejectClaim(auth.signer, jobId, cumulativeAmount, deliverable, reason, optParams);
     }
 
     function _verifyAuthorization(

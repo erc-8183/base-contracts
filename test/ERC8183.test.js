@@ -21,6 +21,8 @@ const {
  */
 describe("Image Generation", function () {
   const TWENTY_USDC = 20_000_000n; // 20 USDC (6 decimals)
+  const TEN_USDC = 10_000_000n;
+  const EMPTY_DELIVERABLE = ethers.ZeroHash;
 
   async function deployFixture() {
     const [deployer, client, provider, evaluator] = await ethers.getSigners();
@@ -46,6 +48,26 @@ describe("Image Generation", function () {
 
     return { usdc, core, deployer, client, provider, evaluator };
   }
+
+  async function createFundedJob({ core, usdc, client, provider, evaluator, amount = TWENTY_USDC }) {
+    const expiry = (await time.latest()) + 3600;
+    const usdcAddr = await usdc.getAddress();
+
+    await core.connect(client).createJob(provider.address, evaluator.address, expiry, "claim job", ethers.ZeroAddress, 0);
+    const jobId = 1n;
+    await core.connect(provider).setBudget(jobId, usdcAddr, amount, "0x");
+    await core.connect(client).fund(jobId, amount, "0x");
+
+    return { jobId, expiry };
+  }
+
+  const claimBindingHash = (amount, deliverable, optParams = "0x") =>
+    ethers.keccak256(
+      ethers.AbiCoder.defaultAbiCoder().encode(
+        ["uint256", "bytes32", "bytes32"],
+        [amount, deliverable, ethers.keccak256(optParams)]
+      )
+    );
 
   it("e2e: two jobs on the same contract using different tokens (USDC and cbBTC)", async function () {
     const { usdc, core, deployer, client, provider, evaluator } =
@@ -372,5 +394,56 @@ describe("Image Generation", function () {
     await core.claimRefund(jobId);
     expect((await core.getJob(jobId)).status).to.equal(5n); // Expired
     expect(await usdc.balanceOf(client.address)).to.equal(TWENTY_USDC);
+  });
+
+  it("claims: client directly submits a zero-deliverable claim without a voucher signature", async function () {
+    const { usdc, core, client, provider, evaluator } =
+      await loadFixture(deployFixture);
+    const coreAddr = await core.getAddress();
+    const { jobId } = await createFundedJob({ core, usdc, client, provider, evaluator });
+
+    await expect(core.connect(provider).submitClaim(jobId, TEN_USDC, EMPTY_DELIVERABLE, "0x"))
+      .to.be.revertedWithCustomError(core, "Unauthorized");
+    await expect(core.connect(client).submitClaim(jobId, TEN_USDC, EMPTY_DELIVERABLE, "0x"))
+      .to.emit(core, "Settled")
+      .withArgs(jobId, TEN_USDC, TEN_USDC)
+      .to.emit(core, "ClaimSubmitted")
+      .withArgs(jobId, client.address, TEN_USDC, TEN_USDC, EMPTY_DELIVERABLE);
+
+    expect((await core.getJob(jobId)).settledAmount).to.equal(TEN_USDC);
+    expect(await core.pendingClaimHash(jobId)).to.equal(ethers.ZeroHash);
+    expect(await usdc.balanceOf(provider.address)).to.equal(TEN_USDC);
+    expect(await usdc.balanceOf(coreAddr)).to.equal(TEN_USDC);
+  });
+
+  it("claims: nonzero deliverable records pending hash and settles on approval", async function () {
+    const { usdc, core, client, provider, evaluator } =
+      await loadFixture(deployFixture);
+    const coreAddr = await core.getAddress();
+    const { jobId } = await createFundedJob({ core, usdc, client, provider, evaluator });
+    const deliverable = ethers.encodeBytes32String("milestone-1");
+    const optParams = "0x1234";
+
+    await expect(core.connect(provider).submitClaim(jobId, TEN_USDC, deliverable, optParams))
+      .to.be.revertedWithCustomError(core, "Unauthorized");
+    await expect(core.connect(client).submitClaim(jobId, TEN_USDC, deliverable, optParams))
+      .to.emit(core, "ClaimSubmitted")
+      .withArgs(jobId, client.address, TEN_USDC, TEN_USDC, deliverable);
+
+    expect((await core.getJob(jobId)).settledAmount).to.equal(0n);
+    expect(await core.pendingClaimHash(jobId)).to.equal(claimBindingHash(TEN_USDC, deliverable, optParams));
+    expect(await usdc.balanceOf(provider.address)).to.equal(0n);
+    expect(await usdc.balanceOf(coreAddr)).to.equal(TWENTY_USDC);
+
+    await expect(core.connect(evaluator).approveClaim(jobId, TEN_USDC, deliverable, optParams))
+      .to.emit(core, "Settled")
+      .withArgs(jobId, TEN_USDC, TEN_USDC)
+      .to.emit(core, "ClaimApproved")
+      .withArgs(jobId, evaluator.address, TEN_USDC, TEN_USDC, deliverable);
+
+    expect((await core.getJob(jobId)).settledAmount).to.equal(TEN_USDC);
+    expect(await core.pendingClaimHash(jobId)).to.equal(ethers.ZeroHash);
+    expect(await usdc.balanceOf(provider.address)).to.equal(TEN_USDC);
+    expect(await usdc.balanceOf(coreAddr)).to.equal(TEN_USDC);
   });
 });
