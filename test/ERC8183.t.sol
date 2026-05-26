@@ -2,19 +2,21 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 
 import {ERC8183} from "../contracts/ERC8183.sol";
 import {MockUSDC} from "../contracts/mocks/MockUSDC.sol";
 import {MockCBBTC} from "../contracts/mocks/MockCBBTC.sol";
+import {MockDisburser, NotADisburser} from "../contracts/mocks/MockDisburser.sol";
 import {MockFeeOnTransferToken} from "../contracts/mocks/MockFeeOnTransferToken.sol";
 
 /// @notice Image Generation — E2E flow (no hook, core-only payment).
 ///         Mirrors the original Hardhat suite in test/ERC8183.test.js.
 contract ERC8183Test is Test {
     uint256 constant TWENTY_USDC = 20_000_000; // 6 decimals
-    uint256 constant ONE_CBBTC = 100_000_000;  // 8 decimals
+    uint256 constant ONE_CBBTC = 100_000_000; // 8 decimals
 
     ERC8183 core;
     MockUSDC usdc;
@@ -31,6 +33,8 @@ contract ERC8183Test is Test {
     event JobSubmitted(uint256 indexed jobId, address indexed provider, bytes32 deliverable);
     event JobCompleted(uint256 indexed jobId, address indexed evaluator, bytes32 reason);
     event PaymentReleased(uint256 indexed jobId, address indexed provider, uint256 amount);
+    event PayoutReceiverSet(uint256 indexed jobId, address indexed payoutReceiver);
+    event Disbursed(uint256 indexed jobId, address indexed receiver, bytes4 selector, uint256 amount);
     event PaymentTokenAllowlistUpdated(address indexed token, bool status);
 
     function setUp() public {
@@ -55,6 +59,19 @@ contract ERC8183Test is Test {
 
     function _futureExpiry() internal view returns (uint48) {
         return uint48(block.timestamp + 3600);
+    }
+
+    function _createSubmittedJob(address payoutReceiver) internal returns (uint256 jobId) {
+        uint48 expiry = _futureExpiry();
+
+        vm.prank(client);
+        jobId = core.createJob(provider, evaluator, expiry, "receiver job", address(0), payoutReceiver, 0);
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, TWENTY_USDC, "");
+        vm.prank(provider);
+        core.submit(jobId, bytes32("done"), "");
     }
 
     // ──────────────────────────────────────────────────────────
@@ -154,13 +171,7 @@ contract ERC8183Test is Test {
         // Step 1: create job
         vm.prank(client);
         core.createJob(
-            provider,
-            evaluator,
-            expiry,
-            "Generate a beautiful landscape wallpaper image",
-            address(0),
-            address(0),
-            0
+            provider, evaluator, expiry, "Generate a beautiful landscape wallpaper image", address(0), address(0), 0
         );
         uint256 jobId = 1;
 
@@ -300,11 +311,7 @@ contract ERC8183Test is Test {
 
         // Non-admin reverts with AccessControl error
         vm.expectRevert(
-            abi.encodeWithSelector(
-                IAccessControl.AccessControlUnauthorizedAccount.selector,
-                client,
-                core.ADMIN_ROLE()
-            )
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, client, core.ADMIN_ROLE())
         );
         vm.prank(client);
         core.setPaymentTokenAllowed(address(tok), true);
@@ -378,5 +385,125 @@ contract ERC8183Test is Test {
         core.claimRefund(jobId);
         assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Expired));
         assertEq(usdc.balanceOf(client), TWENTY_USDC);
+    }
+
+    function test_payoutReceiver_ZeroAddressKeepsPayProviderDirectlyBehavior() public {
+        uint256 jobId = _createSubmittedJob(address(0));
+
+        assertEq(core.getJob(jobId).payoutReceiver, address(0));
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit PaymentReleased(jobId, provider, TWENTY_USDC);
+        vm.prank(evaluator);
+        core.complete(jobId, bytes32("ok"), "");
+
+        assertEq(usdc.balanceOf(provider), TWENTY_USDC);
+    }
+
+    function test_payoutReceiver_DisburserContractReceivesFundsAndCallback() public {
+        MockDisburser disburser = new MockDisburser();
+        uint256 jobId = _createSubmittedJob(address(disburser));
+
+        bytes4 completeSelector = core.complete.selector;
+        bytes memory callbackData = hex"deadbeef";
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit PaymentReleased(jobId, address(disburser), TWENTY_USDC);
+        vm.expectEmit(true, true, true, true, address(core));
+        emit Disbursed(jobId, address(disburser), completeSelector, TWENTY_USDC);
+        vm.prank(evaluator);
+        core.complete(jobId, bytes32("ok"), callbackData);
+
+        assertEq(usdc.balanceOf(address(disburser)), TWENTY_USDC);
+        assertEq(disburser.callCount(), 1);
+        assertEq(disburser.lastJobId(), jobId);
+        assertEq(disburser.lastSelector(), completeSelector);
+        assertEq(disburser.lastToken(), address(usdc));
+        assertEq(disburser.lastAmount(), TWENTY_USDC);
+        assertEq(disburser.lastData(), callbackData);
+    }
+
+    function test_payoutReceiver_EOAReceiverReceivesFundsWithoutCallback() public {
+        address payoutReceiver = makeAddr("payoutReceiver");
+        uint256 jobId = _createSubmittedJob(payoutReceiver);
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit PaymentReleased(jobId, payoutReceiver, TWENTY_USDC);
+        vm.recordLogs();
+        vm.prank(evaluator);
+        core.complete(jobId, bytes32("ok"), "");
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 disbursedTopic = keccak256("Disbursed(uint256,address,bytes4,uint256)");
+        for (uint256 i = 0; i < logs.length; i++) {
+            assertFalse(logs[i].topics[0] == disbursedTopic);
+        }
+        assertEq(usdc.balanceOf(payoutReceiver), TWENTY_USDC);
+    }
+
+    function test_payoutReceiver_NonDisburserContractReceivesFundsWithoutCallback() public {
+        NotADisburser receiver = new NotADisburser();
+        uint256 jobId = _createSubmittedJob(address(receiver));
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit PaymentReleased(jobId, address(receiver), TWENTY_USDC);
+        vm.recordLogs();
+        vm.prank(evaluator);
+        core.complete(jobId, bytes32("ok"), "");
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 disbursedTopic = keccak256("Disbursed(uint256,address,bytes4,uint256)");
+        for (uint256 i = 0; i < logs.length; i++) {
+            assertFalse(logs[i].topics[0] == disbursedTopic);
+        }
+        assertEq(usdc.balanceOf(address(receiver)), TWENTY_USDC);
+    }
+
+    function test_setPayoutReceiver_ProviderOnlyOpenOnlyAcceptsPlainContractsAndLocksAfterFund() public {
+        MockDisburser disburser = new MockDisburser();
+        NotADisburser plainReceiver = new NotADisburser();
+        uint48 expiry = _futureExpiry();
+
+        vm.prank(client);
+        core.createJob(provider, evaluator, expiry, "setter test", address(0), address(0), 0);
+        uint256 jobId = 1;
+
+        vm.expectRevert(ERC8183.Unauthorized.selector);
+        vm.prank(client);
+        core.setPayoutReceiver(jobId, address(disburser));
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit PayoutReceiverSet(jobId, address(plainReceiver));
+        vm.prank(provider);
+        core.setPayoutReceiver(jobId, address(plainReceiver));
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit PayoutReceiverSet(jobId, address(disburser));
+        vm.prank(provider);
+        core.setPayoutReceiver(jobId, address(disburser));
+        assertEq(core.getJob(jobId).payoutReceiver, address(disburser));
+
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, TWENTY_USDC, "");
+
+        vm.expectRevert(ERC8183.WrongStatus.selector);
+        vm.prank(provider);
+        core.setPayoutReceiver(jobId, address(0));
+    }
+
+    function test_complete_RevertsWhenReceiverDisburserRevertsStrictly() public {
+        MockDisburser disburser = new MockDisburser();
+        uint256 jobId = _createSubmittedJob(address(disburser));
+
+        disburser.setShouldRevert(true);
+
+        vm.expectRevert(bytes("MockDisburser: forced revert"));
+        vm.prank(evaluator);
+        core.complete(jobId, bytes32("ok"), "");
+
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Submitted));
+        assertEq(usdc.balanceOf(address(core)), TWENTY_USDC);
     }
 }
