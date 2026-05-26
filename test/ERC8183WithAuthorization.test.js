@@ -7,6 +7,7 @@ const {
 
 describe("ERC8183WithAuthorization", function () {
   const TWENTY_USDC = 20_000_000n;
+  const MAX_UINT72 = (1n << 72n) - 1n;
 
   async function deployFixture() {
     const [deployer, client, provider, evaluator, relayer] = await ethers.getSigners();
@@ -41,7 +42,7 @@ describe("ERC8183WithAuthorization", function () {
         { name: "descriptionHash", type: "bytes32" },
         { name: "hook", type: "address" },
         { name: "providerAgentId", type: "uint256" },
-        { name: "nonce", type: "bytes32" },
+        { name: "nonce", type: "uint72" },
         { name: "deadline", type: "uint256" },
       ],
       SetProviderAuthorization: [
@@ -49,7 +50,7 @@ describe("ERC8183WithAuthorization", function () {
         { name: "jobId", type: "uint256" },
         { name: "provider", type: "address" },
         { name: "agentId", type: "uint256" },
-        { name: "nonce", type: "bytes32" },
+        { name: "nonce", type: "uint72" },
         { name: "deadline", type: "uint256" },
       ],
       SetBudgetAuthorization: [
@@ -58,7 +59,7 @@ describe("ERC8183WithAuthorization", function () {
         { name: "token", type: "address" },
         { name: "amount", type: "uint256" },
         { name: "optParamsHash", type: "bytes32" },
-        { name: "nonce", type: "bytes32" },
+        { name: "nonce", type: "uint72" },
         { name: "deadline", type: "uint256" },
       ],
       FundAuthorization: [
@@ -66,7 +67,7 @@ describe("ERC8183WithAuthorization", function () {
         { name: "jobId", type: "uint256" },
         { name: "expectedBudget", type: "uint256" },
         { name: "optParamsHash", type: "bytes32" },
-        { name: "nonce", type: "bytes32" },
+        { name: "nonce", type: "uint72" },
         { name: "deadline", type: "uint256" },
       ],
       SubmitAuthorization: [
@@ -74,7 +75,7 @@ describe("ERC8183WithAuthorization", function () {
         { name: "jobId", type: "uint256" },
         { name: "deliverable", type: "bytes32" },
         { name: "optParamsHash", type: "bytes32" },
-        { name: "nonce", type: "bytes32" },
+        { name: "nonce", type: "uint72" },
         { name: "deadline", type: "uint256" },
       ],
       CompleteAuthorization: [
@@ -82,7 +83,7 @@ describe("ERC8183WithAuthorization", function () {
         { name: "jobId", type: "uint256" },
         { name: "reason", type: "bytes32" },
         { name: "optParamsHash", type: "bytes32" },
-        { name: "nonce", type: "bytes32" },
+        { name: "nonce", type: "uint72" },
         { name: "deadline", type: "uint256" },
       ],
       RejectAuthorization: [
@@ -90,15 +91,16 @@ describe("ERC8183WithAuthorization", function () {
         { name: "jobId", type: "uint256" },
         { name: "reason", type: "bytes32" },
         { name: "optParamsHash", type: "bytes32" },
-        { name: "nonce", type: "bytes32" },
+        { name: "nonce", type: "uint72" },
         { name: "deadline", type: "uint256" },
       ],
     };
     return signerWallet.signTypedData(domain, { [typeName]: types[typeName] }, value);
   }
 
-  function nonce(value) {
-    return ethers.zeroPadValue(ethers.toBeHex(value), 32);
+  function packedNonce(signer, value) {
+    const nonceValue = ethers.zeroPadValue(ethers.toBeHex(value), 12);
+    return ethers.concat([signer, nonceValue]);
   }
 
   function hashBytes(value) {
@@ -139,7 +141,7 @@ describe("ERC8183WithAuthorization", function () {
         descriptionHash: hashString(description),
         hook,
         providerAgentId: 0,
-        nonce: nonce(1),
+        nonce: 1n,
         deadline,
       },
     );
@@ -147,11 +149,11 @@ describe("ERC8183WithAuthorization", function () {
     await expect(
       core.connect(relayer).createJobWithAuthorization(createParams, {
         signer: client.address,
-        nonce: nonce(1),
+        nonce: 1n,
         deadline,
         sig: createSig,
       }),
-    ).to.emit(core, "AuthorizationUsed").withArgs(client.address, nonce(1));
+    ).to.emit(core, "AuthorizationUsed").withArgs(client.address, packedNonce(client.address, 1n));
 
     const jobId = 1n;
     expect((await core.getJob(jobId)).client).to.equal(client.address);
@@ -166,13 +168,13 @@ describe("ERC8183WithAuthorization", function () {
         token: usdcAddr,
         amount: TWENTY_USDC,
         optParamsHash: hashBytes(optParams),
-        nonce: nonce(2),
+        nonce: 2n,
         deadline,
       },
     );
     await core.connect(relayer).setBudgetWithAuthorization(jobId, usdcAddr, TWENTY_USDC, optParams, {
       signer: provider.address,
-      nonce: nonce(2),
+      nonce: 2n,
       deadline,
       sig: setBudgetSig,
     });
@@ -182,12 +184,12 @@ describe("ERC8183WithAuthorization", function () {
       jobId,
       expectedBudget: TWENTY_USDC,
       optParamsHash: hashBytes(optParams),
-      nonce: nonce(3),
+      nonce: 3n,
       deadline,
     });
     await core.connect(relayer).fundWithAuthorization(jobId, TWENTY_USDC, optParams, {
       signer: client.address,
-      nonce: nonce(3),
+      nonce: 3n,
       deadline,
       sig: fundSig,
     });
@@ -198,12 +200,12 @@ describe("ERC8183WithAuthorization", function () {
       jobId,
       deliverable,
       optParamsHash: hashBytes(optParams),
-      nonce: nonce(4),
+      nonce: 4n,
       deadline,
     });
     await core.connect(relayer).submitWithAuthorization(jobId, deliverable, optParams, {
       signer: provider.address,
-      nonce: nonce(4),
+      nonce: 4n,
       deadline,
       sig: submitSig,
     });
@@ -214,12 +216,12 @@ describe("ERC8183WithAuthorization", function () {
       jobId,
       reason,
       optParamsHash: hashBytes(optParams),
-      nonce: nonce(5),
+      nonce: 5n,
       deadline,
     });
     await core.connect(relayer).completeWithAuthorization(jobId, reason, optParams, {
       signer: evaluator.address,
-      nonce: nonce(5),
+      nonce: 5n,
       deadline,
       sig: completeSig,
     });
@@ -233,7 +235,7 @@ describe("ERC8183WithAuthorization", function () {
     const expiry = (await time.latest()) + 3600;
     const deadline = (await time.latest()) + 7200;
     const description = "replay test";
-    const authNonce = nonce(11);
+    const authNonce = 11n;
     const params = {
       provider: provider.address,
       evaluator: evaluator.address,
@@ -261,11 +263,12 @@ describe("ERC8183WithAuthorization", function () {
     const auth = { signer: client.address, nonce: authNonce, deadline, sig };
 
     await core.connect(relayer).createJobWithAuthorization(params, auth);
+    expect(await core.authorizationNonceUsed(packedNonce(client.address, authNonce))).to.equal(true);
     await expect(core.connect(relayer).createJobWithAuthorization(params, auth))
       .to.be.revertedWithCustomError(core, "AuthorizationNonceUsed");
 
     const expiredDeadline = (await time.latest()) - 1;
-    const expiredNonce = nonce(12);
+    const expiredNonce = 12n;
     const expiredSig = await signAuthorization(
       core,
       client,
@@ -289,7 +292,7 @@ describe("ERC8183WithAuthorization", function () {
       ),
     ).to.be.revertedWithCustomError(core, "AuthorizationExpired");
 
-    const tamperedNonce = nonce(13);
+    const tamperedNonce = 13n;
     const tamperedSig = await signAuthorization(
       core,
       client,
@@ -313,4 +316,111 @@ describe("ERC8183WithAuthorization", function () {
       ),
     ).to.be.revertedWithCustomError(core, "InvalidAuthorizationSignature");
   });
+
+  it("accepts the maximum uint72 nonce and stores its packed key", async function () {
+    const { core, client, provider, evaluator, relayer } = await loadFixture(deployFixture);
+    const expiry = (await time.latest()) + 3600;
+    const deadline = (await time.latest()) + 7200;
+    const description = "max nonce";
+    const params = {
+      provider: provider.address,
+      evaluator: evaluator.address,
+      expiredAt: expiry,
+      description,
+      hook: ethers.ZeroAddress,
+      providerAgentId: 0,
+    };
+    const sig = await signAuthorization(
+      core,
+      client,
+      "CreateJobAuthorization",
+      {
+        signer: client.address,
+        provider: provider.address,
+        evaluator: evaluator.address,
+        expiredAt: expiry,
+        descriptionHash: hashString(description),
+        hook: ethers.ZeroAddress,
+        providerAgentId: 0,
+        nonce: MAX_UINT72,
+        deadline,
+      },
+    );
+    const packed = packedNonce(client.address, MAX_UINT72);
+
+    await expect(
+      core.connect(relayer).createJobWithAuthorization(
+        params,
+        { signer: client.address, nonce: MAX_UINT72, deadline, sig },
+      ),
+    ).to.emit(core, "AuthorizationUsed").withArgs(client.address, packed);
+    expect(await core.authorizationNonceUsed(packed)).to.equal(true);
+  });
+
+  it("allows different signers to use the same numeric nonce", async function () {
+    const { usdc, core, client, provider, evaluator, relayer } = await loadFixture(deployFixture);
+    const expiry = (await time.latest()) + 3600;
+    const deadline = (await time.latest()) + 7200;
+    const description = "shared nonce";
+    const sharedNonce = 42n;
+    const params = {
+      provider: provider.address,
+      evaluator: evaluator.address,
+      expiredAt: expiry,
+      description,
+      hook: ethers.ZeroAddress,
+      providerAgentId: 0,
+    };
+    const createSig = await signAuthorization(
+      core,
+      client,
+      "CreateJobAuthorization",
+      {
+        signer: client.address,
+        provider: provider.address,
+        evaluator: evaluator.address,
+        expiredAt: expiry,
+        descriptionHash: hashString(description),
+        hook: ethers.ZeroAddress,
+        providerAgentId: 0,
+        nonce: sharedNonce,
+        deadline,
+      },
+    );
+    await core.connect(relayer).createJobWithAuthorization(params, {
+      signer: client.address,
+      nonce: sharedNonce,
+      deadline,
+      sig: createSig,
+    });
+
+    const jobId = 1n;
+    const usdcAddr = await usdc.getAddress();
+    const setBudgetSig = await signAuthorization(
+      core,
+      provider,
+      "SetBudgetAuthorization",
+      {
+        signer: provider.address,
+        jobId,
+        token: usdcAddr,
+        amount: TWENTY_USDC,
+        optParamsHash: hashBytes("0x"),
+        nonce: sharedNonce,
+        deadline,
+      },
+    );
+
+    await expect(
+      core.connect(relayer).setBudgetWithAuthorization(jobId, usdcAddr, TWENTY_USDC, "0x", {
+        signer: provider.address,
+        nonce: sharedNonce,
+        deadline,
+        sig: setBudgetSig,
+      }),
+    ).to.emit(core, "AuthorizationUsed").withArgs(provider.address, packedNonce(provider.address, sharedNonce));
+    expect(await core.authorizationNonceUsed(packedNonce(client.address, sharedNonce))).to.equal(true);
+    expect(await core.authorizationNonceUsed(packedNonce(provider.address, sharedNonce))).to.equal(true);
+  });
+
 });
