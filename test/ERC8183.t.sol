@@ -74,7 +74,7 @@ contract ERC8183Test is Test {
 
         // Job 1: paid in USDC
         vm.prank(client);
-        core.createJob(provider, evaluator, expiry, "Job paid in USDC", address(0), 0);
+        core.createJob(provider, evaluator, expiry, "Job paid in USDC", address(0), address(0), 0);
         uint256 jobId1 = 1;
         vm.prank(provider);
         core.setBudget(jobId1, address(usdc), TWENTY_USDC, "");
@@ -82,7 +82,7 @@ contract ERC8183Test is Test {
 
         // Job 2: paid in cbBTC
         vm.prank(client);
-        core.createJob(provider, evaluator, expiry, "Job paid in cbBTC", address(0), 0);
+        core.createJob(provider, evaluator, expiry, "Job paid in cbBTC", address(0), address(0), 0);
         uint256 jobId2 = 2;
         vm.prank(provider);
         core.setBudget(jobId2, address(cbbtc), ONE_CBBTC, "");
@@ -123,12 +123,12 @@ contract ERC8183Test is Test {
 
         // createJob with agentId when provider is known
         vm.prank(client);
-        core.createJob(provider, evaluator, expiry, "Job with agentId", address(0), AGENT_ID);
+        core.createJob(provider, evaluator, expiry, "Job with agentId", address(0), address(0), AGENT_ID);
         assertEq(core.getJob(1).providerAgentId, AGENT_ID);
 
         // createJob without provider: agentId should be 0 even if a non-zero value is passed
         vm.prank(client);
-        core.createJob(address(0), evaluator, expiry, "Job without provider", address(0), 99);
+        core.createJob(address(0), evaluator, expiry, "Job without provider", address(0), address(0), 99);
         assertEq(core.getJob(2).providerAgentId, 0);
 
         uint256 AGENT_ID_2 = 7;
@@ -141,7 +141,7 @@ contract ERC8183Test is Test {
 
         // agentId = 0 is valid
         vm.prank(client);
-        core.createJob(provider, evaluator, expiry, "No agentId", address(0), 0);
+        core.createJob(provider, evaluator, expiry, "No agentId", address(0), address(0), 0);
         assertEq(core.getJob(3).providerAgentId, 0);
     }
 
@@ -158,6 +158,7 @@ contract ERC8183Test is Test {
             evaluator,
             expiry,
             "Generate a beautiful landscape wallpaper image",
+            address(0),
             address(0),
             0
         );
@@ -226,7 +227,7 @@ contract ERC8183Test is Test {
         uint48 expiry = _futureExpiry();
 
         vm.prank(client);
-        core.createJob(provider, evaluator, expiry, "grace period test", address(0), 0);
+        core.createJob(provider, evaluator, expiry, "grace period test", address(0), address(0), 0);
         uint256 jobId = 1;
 
         vm.prank(provider);
@@ -258,7 +259,7 @@ contract ERC8183Test is Test {
         uint48 expiry = _futureExpiry();
 
         vm.prank(client);
-        core.createJob(provider, evaluator, expiry, "grace expiry test", address(0), 0);
+        core.createJob(provider, evaluator, expiry, "grace expiry test", address(0), address(0), 0);
         uint256 jobId = 1;
 
         vm.prank(provider);
@@ -283,7 +284,7 @@ contract ERC8183Test is Test {
 
         uint48 expiry = _futureExpiry();
         vm.prank(client);
-        core.createJob(provider, evaluator, expiry, "test", address(0), 0);
+        core.createJob(provider, evaluator, expiry, "test", address(0), address(0), 0);
         uint256 jobId = 1;
 
         vm.expectRevert(ERC8183.PaymentTokenNotAllowed.selector);
@@ -343,7 +344,7 @@ contract ERC8183Test is Test {
 
         uint48 expiry = _futureExpiry();
         vm.prank(client);
-        core.createJob(provider, evaluator, expiry, "fot", address(0), 0);
+        core.createJob(provider, evaluator, expiry, "fot", address(0), address(0), 0);
         uint256 jobId = 1;
 
         vm.prank(provider);
@@ -364,7 +365,7 @@ contract ERC8183Test is Test {
         uint48 expiry = _futureExpiry();
 
         vm.prank(client);
-        core.createJob(provider, evaluator, expiry, "no grace test", address(0), 0);
+        core.createJob(provider, evaluator, expiry, "no grace test", address(0), address(0), 0);
         uint256 jobId = 1;
 
         vm.prank(provider);
