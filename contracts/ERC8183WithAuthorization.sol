@@ -111,7 +111,7 @@ contract ERC8183WithAuthorization is ERC8183 {
         address provider_,
         uint256 agentId,
         Authorization calldata auth
-    ) external whenNotPaused {
+    ) external whenNotPaused nonReentrant {
         _verifyAuthorization(
             auth.signer,
             auth.nonce,
@@ -320,9 +320,9 @@ contract ERC8183WithAuthorization is ERC8183 {
         if (block.timestamp > deadline) revert AuthorizationExpired();
         bytes32 packedNonce = _packAuthorizationNonce(signer, nonce);
         if (authorizationNonceUsed[packedNonce]) revert AuthorizationNonceUsed();
+        authorizationNonceUsed[packedNonce] = true;
         bytes32 digest = _hashTypedDataV4(structHash);
         if (!SignatureChecker.isValidSignatureNowCalldata(signer, digest, sig)) revert InvalidAuthorizationSignature();
-        authorizationNonceUsed[packedNonce] = true;
         emit AuthorizationUsed(signer, packedNonce);
     }
 

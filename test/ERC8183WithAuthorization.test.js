@@ -424,6 +424,41 @@ describe("ERC8183WithAuthorization", function () {
         { signer: client.address, nonce: tamperedNonce, deadline, sig: tamperedSig },
       ),
     ).to.be.revertedWithCustomError(core, "InvalidAuthorizationSignature");
+    expect(await core.authorizationNonceUsed(packedNonce(client.address, tamperedNonce))).to.equal(false);
+  });
+
+  it("reserves the packed nonce before ERC-1271 signature validation", async function () {
+    const { core, provider, evaluator, relayer } = await loadFixture(deployFixture);
+    const ContractSigner = await ethers.getContractFactory("MockERC1271NonceObserver");
+    const contractSigner = await ContractSigner.deploy();
+    const signerAddress = await contractSigner.getAddress();
+    const coreAddress = await core.getAddress();
+    const expiry = (await time.latest()) + 3600;
+    const deadline = (await time.latest()) + 7200;
+    const nonce = 31n;
+    const packed = packedNonce(signerAddress, nonce);
+    const description = "erc1271 nonce reservation";
+    const params = {
+      provider: provider.address,
+      evaluator: evaluator.address,
+      expiredAt: expiry,
+      description,
+      hook: ethers.ZeroAddress,
+      providerAgentId: 0,
+    };
+    const sig = ethers.AbiCoder.defaultAbiCoder().encode(["address", "bytes32"], [coreAddress, packed]);
+
+    await expect(
+      core.connect(relayer).createJobWithAuthorization(params, {
+        signer: signerAddress,
+        nonce,
+        deadline,
+        sig,
+      }),
+    ).to.emit(core, "AuthorizationUsed").withArgs(signerAddress, packed);
+
+    expect(await core.authorizationNonceUsed(packed)).to.equal(true);
+    expect((await core.getJob(1n)).client).to.equal(signerAddress);
   });
 
   it("accepts the maximum uint72 nonce and stores its packed key", async function () {
