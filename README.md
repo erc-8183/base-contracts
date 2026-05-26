@@ -4,10 +4,12 @@ Reference implementation of [ERC-8183](https://eips.ethereum.org/EIPS/eip-8183) 
 
 ## Quick Start
 
+Requires [Foundry](https://getfoundry.sh/).
+
 ```shell
-npm install
-npx hardhat compile
-npx hardhat test
+forge install
+forge build
+forge test
 ```
 
 ## Overview

@@ -1,19 +1,18 @@
-# Dependencies
-node_modules/
-
-# Build / cache
-artifacts/
+# Foundry build artifacts
+out/
 cache/
-typechain-types/
+broadcast/
+
+# Submodule contents (tracked via .gitmodules + gitlinks, not file content)
+lib/
+
+# Coverage
 coverage/
-coverage.json
+lcov.info
 
 # Env
 .env
 .env.*
-
-# OpenZeppelin
-.openzeppelin/
 
 # IDE
 .idea/
