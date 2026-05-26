@@ -9,32 +9,33 @@ import "./ERC8183.sol";
 /// @notice Adds EIP-712 signed authorization entrypoints to ERC8183.
 contract ERC8183WithAuthorization is ERC8183, EIP712Upgradeable {
     bytes32 public constant CREATE_JOB_AUTHORIZATION_TYPEHASH = keccak256(
-        "CreateJobAuthorization(address signer,address provider,address evaluator,uint48 expiredAt,bytes32 descriptionHash,address hook,uint256 providerAgentId,bytes32 nonce,uint256 deadline)"
+        "CreateJobAuthorization(address signer,address provider,address evaluator,uint48 expiredAt,bytes32 descriptionHash,address hook,uint256 providerAgentId,uint72 nonce,uint256 deadline)"
     );
     bytes32 public constant SET_PROVIDER_AUTHORIZATION_TYPEHASH = keccak256(
-        "SetProviderAuthorization(address signer,uint256 jobId,address provider,uint256 agentId,bytes32 nonce,uint256 deadline)"
+        "SetProviderAuthorization(address signer,uint256 jobId,address provider,uint256 agentId,uint72 nonce,uint256 deadline)"
     );
     bytes32 public constant SET_BUDGET_AUTHORIZATION_TYPEHASH = keccak256(
-        "SetBudgetAuthorization(address signer,uint256 jobId,address token,uint256 amount,bytes32 optParamsHash,bytes32 nonce,uint256 deadline)"
+        "SetBudgetAuthorization(address signer,uint256 jobId,address token,uint256 amount,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
     bytes32 public constant FUND_AUTHORIZATION_TYPEHASH = keccak256(
-        "FundAuthorization(address signer,uint256 jobId,uint256 expectedBudget,bytes32 optParamsHash,bytes32 nonce,uint256 deadline)"
+        "FundAuthorization(address signer,uint256 jobId,uint256 expectedBudget,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
     bytes32 public constant SUBMIT_AUTHORIZATION_TYPEHASH = keccak256(
-        "SubmitAuthorization(address signer,uint256 jobId,bytes32 deliverable,bytes32 optParamsHash,bytes32 nonce,uint256 deadline)"
+        "SubmitAuthorization(address signer,uint256 jobId,bytes32 deliverable,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
     bytes32 public constant COMPLETE_AUTHORIZATION_TYPEHASH = keccak256(
-        "CompleteAuthorization(address signer,uint256 jobId,bytes32 reason,bytes32 optParamsHash,bytes32 nonce,uint256 deadline)"
+        "CompleteAuthorization(address signer,uint256 jobId,bytes32 reason,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
     bytes32 public constant REJECT_AUTHORIZATION_TYPEHASH = keccak256(
-        "RejectAuthorization(address signer,uint256 jobId,bytes32 reason,bytes32 optParamsHash,bytes32 nonce,uint256 deadline)"
+        "RejectAuthorization(address signer,uint256 jobId,bytes32 reason,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
 
-    mapping(address => mapping(bytes32 => bool)) public authorizationNonceUsed;
+    /// @notice Tracks used packed nonces: bytes20(signer) || uint72 nonce.
+    mapping(bytes32 => bool) public authorizationNonceUsed;
 
     struct Authorization {
         address signer;
-        bytes32 nonce;
+        uint72 nonce;
         uint256 deadline;
         bytes sig;
     }
@@ -218,16 +219,21 @@ contract ERC8183WithAuthorization is ERC8183, EIP712Upgradeable {
 
     function _verifyAuthorization(
         address signer,
-        bytes32 nonce,
+        uint72 nonce,
         uint256 deadline,
         bytes32 structHash,
         bytes calldata sig
     ) internal {
         if (block.timestamp > deadline) revert AuthorizationExpired();
-        if (authorizationNonceUsed[signer][nonce]) revert AuthorizationNonceUsed();
+        bytes32 packedNonce = _packAuthorizationNonce(signer, nonce);
+        if (authorizationNonceUsed[packedNonce]) revert AuthorizationNonceUsed();
         bytes32 digest = _hashTypedDataV4(structHash);
         if (!SignatureChecker.isValidSignatureNowCalldata(signer, digest, sig)) revert InvalidAuthorizationSignature();
-        authorizationNonceUsed[signer][nonce] = true;
-        emit AuthorizationUsed(signer, nonce);
+        authorizationNonceUsed[packedNonce] = true;
+        emit AuthorizationUsed(signer, packedNonce);
+    }
+
+    function _packAuthorizationNonce(address signer, uint72 nonce) internal pure returns (bytes32) {
+        return bytes32((uint256(uint160(signer)) << 96) | uint256(nonce));
     }
 }
