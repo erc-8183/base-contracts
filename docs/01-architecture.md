@@ -12,8 +12,8 @@ stateDiagram-v2
     Open --> Expired: claimRefund()\n[after expiry]\n(no escrow to refund)
 
     Funded --> Submitted: submit(deliverable)\n[provider only]
-    Funded --> Funded: submitClaim(bytes32(0))\n[client direct or client authorization]\n💸 delta released
-    Funded --> Funded: submitClaim(nonzero deliverable)\n[client direct or client authorization]\npending claim
+    Funded --> Funded: submitClaim()\n[provider direct or authorization]\npending claim
+    Funded --> Funded: settleClaim()\n[client direct or authorization]\n💸 delta released
     Funded --> Funded: approveClaim()\n[client/evaluator direct or authorization]\n💸 delta released
     Funded --> Funded: rejectClaim()\n[client/evaluator direct or authorization]\npending cleared
     Funded --> Rejected: reject()\n[evaluator only]\n↩️ client refunded
@@ -28,7 +28,7 @@ stateDiagram-v2
     Expired --> [*]
 ```
 
-`submitClaim` is an incremental settlement path while the job remains `Funded`. In the direct flow, the client sends the transaction, so no voucher signature is required. In the relayed flow, `ERC8183WithAuthorization.submitClaimWithAuthorization` carries the client's EIP-712 authorization signature for the same claim parameters. A zero deliverable releases the new delta immediately. A nonzero deliverable records a pending claim hash; the client or evaluator then approves or rejects it, directly or through `approveClaimWithAuthorization` / `rejectClaimWithAuthorization`.
+Claims have separate slow and fast paths while the job remains `Funded`. In the slow path, the provider calls `submitClaim` or signs `submitClaimWithAuthorization` to record a pending nonzero-deliverable claim. The client or evaluator then approves or rejects it, directly or through `approveClaimWithAuthorization` / `rejectClaimWithAuthorization`. In the fast path, the client calls `settleClaim` or signs `settleClaimWithAuthorization` to release the new cumulative delta immediately. Both paths settle only `cumulativeAmount - settledAmount`.
 
 After expiry, `claimRefund` is callable by anyone. For `Submitted` jobs, it is gated by an additional `EVALUATION_GRACE_PERIOD` (1 hour) so that an evaluator who is mid-review cannot be censored by a third-party refund call. Refunds and final completion only use the unsettled escrow balance, so funds released by claims are not double-paid or double-refunded.
 
@@ -62,20 +62,23 @@ sequenceDiagram
 sequenceDiagram
     participant C as Client
     participant AC as ERC8183
+    participant P as Provider
     participant E as Evaluator
 
     Note over AC: Status: Funded
-    C->>AC: submitClaim(jobId, cumulativeAmount, deliverable, optParams)
 
-    alt deliverable == bytes32(0)
-        Note over AC: 💸 delta released
-    else deliverable != bytes32(0)
+    alt Slow path: provider claim request
+        P->>AC: submitClaim(jobId, cumulativeAmount, deliverable, optParams)
         Note over AC: pending claim hash stored
-        E->>AC: approveClaim(jobId, cumulativeAmount, deliverable, optParams)
+        C->>AC: approveClaim(jobId, cumulativeAmount, deliverable, optParams)
         Note over AC: 💸 delta released
+    else Fast path: client-authorized settlement
+        C->>AC: settleClaim(jobId, cumulativeAmount, deliverable, optParams)
+        Note over AC: 💸 delta released immediately
     end
 
-    Note over C,AC: Relayed variant: client signs SubmitClaimAuthorization,<br/>relayer calls submitClaimWithAuthorization(...)
+    Note over C,AC: Relayed fast path: client signs SettleClaimAuthorization,<br/>relayer calls settleClaimWithAuthorization(...)
+    Note over P,AC: Relayed slow path: provider signs SubmitClaimAuthorization,<br/>relayer calls submitClaimWithAuthorization(...)
 ```
 
 ## Sequence — Job with Hook

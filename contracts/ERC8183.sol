@@ -184,6 +184,14 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         uint256 delta,
         bytes32 deliverable
     );
+    /// @notice Emitted when a client settles a claim directly
+    event ClaimSettled(
+        uint256 indexed jobId,
+        address indexed settler,
+        uint256 cumulativeAmount,
+        uint256 delta,
+        bytes32 deliverable
+    );
     /// @notice Emitted when a pending claim is approved by the client or evaluator
     event ClaimApproved(
         uint256 indexed jobId,
@@ -265,6 +273,10 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     error ExceedsBudget();
     /// @notice Thrown when submitting a nonzero-deliverable claim hash that was already submitted
     error ClaimAlreadySubmitted();
+    /// @notice Thrown when submitting a provider claim without a deliverable
+    error EmptyDeliverable();
+    /// @notice Thrown when submitting or settling while another claim is pending
+    error PendingClaimExists();
     /// @notice Thrown when approveClaim/rejectClaim is called with no matching pending claim
     error NoPendingClaim();
 
@@ -804,7 +816,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         return keccak256(abi.encode(cumulativeAmount, deliverable, optParamsHash));
     }
 
-    /// @notice Client submits and approves a claim against a funded job.
+    /// @notice Provider submits a pending claim against a funded job.
     function submitClaim(
         uint256 jobId,
         uint256 cumulativeAmount,
@@ -823,9 +835,11 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     ) internal {
         Job storage job = jobs[jobId];
         if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
-        if (actor != job.client) revert Unauthorized();
+        if (actor != job.provider) revert Unauthorized();
         if (job.status != JobStatus.Funded) revert WrongStatus();
         if (block.timestamp >= job.expiredAt) revert WrongStatus();
+        if (deliverable == bytes32(0)) revert EmptyDeliverable();
+        if (pendingClaimHash[jobId] != bytes32(0)) revert PendingClaimExists();
         if (cumulativeAmount <= job.settledAmount) revert NoNewSettlement();
         if (cumulativeAmount > job.budget) revert ExceedsBudget();
 
@@ -833,19 +847,52 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         bytes memory data = abi.encode(actor, cumulativeAmount, deliverable, optParams);
         _beforeHook(job.hook, jobId, this.submitClaim.selector, data);
 
-        if (deliverable == bytes32(0)) {
-            job.settledAmount = cumulativeAmount;
-            _distributeSettlement(jobId, job, delta);
-            emit Settled(jobId, cumulativeAmount, delta);
-        } else {
-            bytes32 claimHash = _claimHash(cumulativeAmount, deliverable, keccak256(optParams));
-            if (submittedClaimHash[jobId][claimHash]) revert ClaimAlreadySubmitted();
-            submittedClaimHash[jobId][claimHash] = true;
-            pendingClaimHash[jobId] = claimHash;
-        }
+        bytes32 claimHash = _claimHash(cumulativeAmount, deliverable, keccak256(optParams));
+        if (submittedClaimHash[jobId][claimHash]) revert ClaimAlreadySubmitted();
+        submittedClaimHash[jobId][claimHash] = true;
+        pendingClaimHash[jobId] = claimHash;
 
         emit ClaimSubmitted(jobId, actor, cumulativeAmount, delta, deliverable);
         _afterHook(job.hook, jobId, this.submitClaim.selector, data);
+    }
+
+    /// @notice Client settles a claim immediately against a funded job.
+    function settleClaim(
+        uint256 jobId,
+        uint256 cumulativeAmount,
+        bytes32 deliverable,
+        bytes calldata optParams
+    ) external whenNotPaused nonReentrant {
+        _settleClaim(msg.sender, jobId, cumulativeAmount, deliverable, optParams);
+    }
+
+    function _settleClaim(
+        address actor,
+        uint256 jobId,
+        uint256 cumulativeAmount,
+        bytes32 deliverable,
+        bytes calldata optParams
+    ) internal {
+        Job storage job = jobs[jobId];
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
+        if (actor != job.client) revert Unauthorized();
+        if (job.status != JobStatus.Funded) revert WrongStatus();
+        if (block.timestamp >= job.expiredAt) revert WrongStatus();
+        if (pendingClaimHash[jobId] != bytes32(0)) revert PendingClaimExists();
+        if (cumulativeAmount <= job.settledAmount) revert NoNewSettlement();
+        if (cumulativeAmount > job.budget) revert ExceedsBudget();
+
+        uint256 delta = cumulativeAmount - job.settledAmount;
+        bytes memory data = abi.encode(actor, cumulativeAmount, deliverable, optParams);
+        _beforeHook(job.hook, jobId, this.settleClaim.selector, data);
+
+        job.settledAmount = cumulativeAmount;
+        _distributeSettlement(jobId, job, delta);
+
+        emit Settled(jobId, cumulativeAmount, delta);
+        emit ClaimSettled(jobId, actor, cumulativeAmount, delta, deliverable);
+
+        _afterHook(job.hook, jobId, this.settleClaim.selector, data);
     }
 
     /// @notice Client or evaluator approves a pending nonzero-deliverable claim.

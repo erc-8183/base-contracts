@@ -31,6 +31,9 @@ contract ERC8183WithAuthorization is ERC8183 {
     bytes32 private constant SUBMIT_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
         "SubmitClaimAuthorization(address signer,uint256 jobId,uint256 cumulativeAmount,bytes32 deliverable,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
+    bytes32 private constant SETTLE_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
+        "SettleClaimAuthorization(address signer,uint256 jobId,uint256 cumulativeAmount,bytes32 deliverable,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
+    );
     bytes32 private constant APPROVE_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
         "ApproveClaimAuthorization(address signer,uint256 jobId,uint256 cumulativeAmount,bytes32 deliverable,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
@@ -250,6 +253,34 @@ contract ERC8183WithAuthorization is ERC8183 {
             auth.sig
         );
         _submitClaim(auth.signer, jobId, cumulativeAmount, deliverable, optParams);
+    }
+
+    function settleClaimWithAuthorization(
+        uint256 jobId,
+        uint256 cumulativeAmount,
+        bytes32 deliverable,
+        bytes calldata optParams,
+        Authorization calldata auth
+    ) external whenNotPaused nonReentrant {
+        _verifyAuthorization(
+            auth.signer,
+            auth.nonce,
+            auth.deadline,
+            keccak256(
+                abi.encode(
+                    SETTLE_CLAIM_AUTHORIZATION_TYPEHASH,
+                    auth.signer,
+                    jobId,
+                    cumulativeAmount,
+                    deliverable,
+                    keccak256(optParams),
+                    auth.nonce,
+                    auth.deadline
+                )
+            ),
+            auth.sig
+        );
+        _settleClaim(auth.signer, jobId, cumulativeAmount, deliverable, optParams);
     }
 
     function approveClaimWithAuthorization(

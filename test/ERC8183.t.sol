@@ -38,6 +38,9 @@ contract ERC8183Test is Test {
     event ClaimSubmitted(
         uint256 indexed jobId, address indexed provider, uint256 cumulativeAmount, uint256 delta, bytes32 deliverable
     );
+    event ClaimSettled(
+        uint256 indexed jobId, address indexed settler, uint256 cumulativeAmount, uint256 delta, bytes32 deliverable
+    );
     event ClaimApproved(
         uint256 indexed jobId, address indexed approver, uint256 cumulativeAmount, uint256 delta, bytes32 deliverable
     );
@@ -394,21 +397,21 @@ contract ERC8183Test is Test {
         assertEq(usdc.balanceOf(client), TWENTY_USDC);
     }
 
-    function test_claims_ClientDirectlySubmitsZeroDeliverableClaimWithoutVoucherSignature() public {
+    function test_claims_ClientSettleClaimFastPathReleasesDelta() public {
         uint256 jobId = _createFundedJob(TWENTY_USDC);
 
         vm.expectRevert(ERC8183.Unauthorized.selector);
         vm.prank(provider);
-        core.submitClaim(jobId, TEN_USDC, EMPTY_DELIVERABLE, "");
+        core.settleClaim(jobId, TEN_USDC, EMPTY_DELIVERABLE, "");
 
         vm.expectEmit(true, true, true, true, address(core));
         emit PaymentReleased(jobId, provider, TEN_USDC);
         vm.expectEmit(true, true, true, true, address(core));
         emit Settled(jobId, TEN_USDC, TEN_USDC);
         vm.expectEmit(true, true, true, true, address(core));
-        emit ClaimSubmitted(jobId, client, TEN_USDC, TEN_USDC, EMPTY_DELIVERABLE);
+        emit ClaimSettled(jobId, client, TEN_USDC, TEN_USDC, EMPTY_DELIVERABLE);
         vm.prank(client);
-        core.submitClaim(jobId, TEN_USDC, EMPTY_DELIVERABLE, "");
+        core.settleClaim(jobId, TEN_USDC, EMPTY_DELIVERABLE, "");
 
         assertEq(core.getJob(jobId).settledAmount, TEN_USDC);
         assertEq(core.pendingClaimHash(jobId), bytes32(0));
@@ -422,12 +425,12 @@ contract ERC8183Test is Test {
         bytes memory optParams = hex"1234";
 
         vm.expectRevert(ERC8183.Unauthorized.selector);
-        vm.prank(provider);
+        vm.prank(client);
         core.submitClaim(jobId, TEN_USDC, deliverable, optParams);
 
         vm.expectEmit(true, true, true, true, address(core));
-        emit ClaimSubmitted(jobId, client, TEN_USDC, TEN_USDC, deliverable);
-        vm.prank(client);
+        emit ClaimSubmitted(jobId, provider, TEN_USDC, TEN_USDC, deliverable);
+        vm.prank(provider);
         core.submitClaim(jobId, TEN_USDC, deliverable, optParams);
 
         assertEq(core.getJob(jobId).settledAmount, 0);
@@ -448,5 +451,33 @@ contract ERC8183Test is Test {
         assertEq(core.pendingClaimHash(jobId), bytes32(0));
         assertEq(usdc.balanceOf(provider), TEN_USDC);
         assertEq(usdc.balanceOf(address(core)), TEN_USDC);
+    }
+
+    function test_claims_SubmitClaimRejectsZeroDeliverableAndPendingOverwrite() public {
+        uint256 jobId = _createFundedJob(TWENTY_USDC);
+        bytes32 deliverable = bytes32("milestone-1");
+
+        vm.expectRevert(ERC8183.EmptyDeliverable.selector);
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, EMPTY_DELIVERABLE, "");
+
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, deliverable, "");
+
+        vm.expectRevert(ERC8183.PendingClaimExists.selector);
+        vm.prank(provider);
+        core.submitClaim(jobId, TWENTY_USDC, bytes32("milestone-2"), "");
+    }
+
+    function test_claims_SettleClaimRevertsWhilePendingClaimExists() public {
+        uint256 jobId = _createFundedJob(TWENTY_USDC);
+        bytes32 deliverable = bytes32("milestone-1");
+
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, deliverable, "");
+
+        vm.expectRevert(ERC8183.PendingClaimExists.selector);
+        vm.prank(client);
+        core.settleClaim(jobId, TEN_USDC, deliverable, "");
     }
 }
