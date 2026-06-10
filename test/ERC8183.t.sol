@@ -481,6 +481,29 @@ contract ERC8183Test is Test {
         core.settleClaim(jobId, TEN_USDC, deliverable, "");
     }
 
+    function test_claims_SubmitClearsPendingClaimAndCompletesFullEscrow() public {
+        uint256 jobId = _createFundedJob(TWENTY_USDC);
+        bytes32 claimDeliverable = bytes32("milestone-1");
+
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, claimDeliverable, "");
+        assertEq(core.pendingClaimHash(jobId), _claimBindingHash(TEN_USDC, claimDeliverable, ""));
+
+        vm.prank(provider);
+        core.submit(jobId, bytes32("final"), "");
+
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Submitted));
+        assertEq(core.pendingClaimHash(jobId), bytes32(0));
+
+        vm.prank(evaluator);
+        core.complete(jobId, bytes32("ok"), "");
+
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Completed));
+        assertEq(core.getJob(jobId).settledAmount, 0);
+        assertEq(usdc.balanceOf(provider), TWENTY_USDC);
+        assertEq(usdc.balanceOf(address(core)), 0);
+    }
+
     function test_claims_PendingClaimBlocksRefundDuringResolutionGracePeriod() public {
         uint48 expiry = _futureExpiry();
         vm.prank(client);

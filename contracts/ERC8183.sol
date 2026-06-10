@@ -646,6 +646,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         bytes memory data = abi.encode(actor, deliverable, optParams);
         _beforeHook(job.hook, jobId, this.submit.selector, data);
 
+        if (pendingClaimHash[jobId] != bytes32(0)) delete pendingClaimHash[jobId];
         job.status = JobStatus.Submitted;
         job.submittedAt = uint48(block.timestamp);
         emit JobSubmitted(jobId, actor, deliverable);
