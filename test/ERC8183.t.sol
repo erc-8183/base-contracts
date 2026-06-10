@@ -44,6 +44,7 @@ contract ERC8183Test is Test {
     event ClaimApproved(
         uint256 indexed jobId, address indexed approver, uint256 cumulativeAmount, uint256 delta, bytes32 deliverable
     );
+    event ClaimRejected(uint256 indexed jobId, address indexed rejector, bytes32 reason);
 
     function setUp() public {
         vm.startPrank(deployer);
@@ -502,6 +503,31 @@ contract ERC8183Test is Test {
         assertEq(core.getJob(jobId).settledAmount, 0);
         assertEq(usdc.balanceOf(provider), TWENTY_USDC);
         assertEq(usdc.balanceOf(address(core)), 0);
+    }
+
+    function test_claims_ProviderCanRejectOwnPendingClaimAndSubmitNewClaim() public {
+        uint256 jobId = _createFundedJob(TWENTY_USDC);
+        bytes32 deliverable = bytes32("milestone-1");
+        bytes32 reason = bytes32("withdrawn");
+
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, deliverable, "");
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit ClaimRejected(jobId, provider, reason);
+        vm.prank(provider);
+        core.rejectClaim(jobId, TEN_USDC, deliverable, reason, "");
+
+        assertEq(core.pendingClaimHash(jobId), bytes32(0));
+
+        vm.expectRevert(ERC8183.ClaimAlreadySubmitted.selector);
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, deliverable, "");
+
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, bytes32("milestone-2"), "");
+
+        assertEq(core.pendingClaimHash(jobId), _claimBindingHash(TEN_USDC, bytes32("milestone-2"), ""));
     }
 
     function test_claims_PendingClaimBlocksRefundDuringResolutionGracePeriod() public {

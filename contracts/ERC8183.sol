@@ -946,7 +946,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         _afterHook(job.hook, jobId, this.approveClaim.selector, data);
     }
 
-    /// @notice Client or evaluator rejects a pending nonzero-deliverable claim.
+    /// @notice Client/evaluator rejects a pending claim, or provider withdraws their own pending claim.
     function rejectClaim(
         uint256 jobId,
         uint256 cumulativeAmount,
@@ -967,7 +967,8 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     ) internal {
         Job storage job = jobs[jobId];
         if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
-        if (actor != job.client && actor != job.evaluator) revert Unauthorized();
+        // The provider may self-cancel a stale claim to unblock a corrected claim.
+        if (actor != job.client && actor != job.evaluator && actor != job.provider) revert Unauthorized();
         if (job.status != JobStatus.Funded) revert WrongStatus();
 
         bytes32 stored = pendingClaimHash[jobId];
@@ -978,6 +979,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         bytes memory data = abi.encode(actor, cumulativeAmount, deliverable, reason, optParams);
         _beforeHook(job.hook, jobId, this.rejectClaim.selector, data);
 
+        // Keep submittedClaimHash consumed; callers must change deliverable or optParams to refile.
         delete pendingClaimHash[jobId];
         emit ClaimRejected(jobId, actor, reason);
 
