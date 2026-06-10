@@ -185,6 +185,8 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         bytes32 deliverable
     );
     /// @notice Emitted when a client settles a claim directly
+    /// @dev `deliverable` is the client's settlement attestation, not a verified
+    ///      provider claim hash.
     event ClaimSettled(
         uint256 indexed jobId,
         address indexed settler,
@@ -776,7 +778,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         if (job.status == JobStatus.Submitted) {
             if (block.timestamp < job.expiredAt + EVALUATION_GRACE_PERIOD) revert GracePeriodActive();
         } else if (hasPendingClaim) {
-            revert GracePeriodActive();
+            revert PendingClaimExists();
         } else {
             if (block.timestamp < job.expiredAt) revert WrongStatus();
         }

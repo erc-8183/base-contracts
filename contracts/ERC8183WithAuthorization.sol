@@ -71,6 +71,8 @@ contract ERC8183WithAuthorization is ERC8183 {
     }
 
     /// @notice Initializes EIP-712 storage when adding authorization support to an existing ERC8183 proxy.
+    /// @dev Sets the ERC8183/1 domain; do not call on proxies using another domain unless invalidating outstanding
+    ///      signatures is intended.
     function initializeAuthorizationV2() public reinitializer(2) onlyRole(DEFAULT_ADMIN_ROLE) {
         __EIP712_init(EIP712_NAME, EIP712_VERSION);
     }

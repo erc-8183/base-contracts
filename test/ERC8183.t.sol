@@ -548,7 +548,7 @@ contract ERC8183Test is Test {
         core.submitClaim(jobId, TEN_USDC, deliverable, "");
 
         vm.warp(uint256(expiry) + 30 days);
-        vm.expectRevert(ERC8183.GracePeriodActive.selector);
+        vm.expectRevert(ERC8183.PendingClaimExists.selector);
         core.claimRefund(jobId);
 
         vm.prank(evaluator);
@@ -574,7 +574,7 @@ contract ERC8183Test is Test {
         core.submitClaim(jobId, TEN_USDC, deliverable, "");
 
         vm.warp(uint256(expiry) + 30 days);
-        vm.expectRevert(ERC8183.GracePeriodActive.selector);
+        vm.expectRevert(ERC8183.PendingClaimExists.selector);
         core.claimRefund(jobId);
 
         vm.prank(provider);
