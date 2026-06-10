@@ -146,6 +146,8 @@ function fund(
 - Hooks MUST NOT be able to change job state outside of defined transitions — they observe and gate, they do not write to `jobs[jobId]`.
 - `beforeAction` can revert to gate transitions — this is intentional and by design.
 - `afterAction` reverts roll back the whole transaction — hook state must stay consistent with core state.
-- `claimRefund` is intentionally not hookable — refunds cannot be blocked or delayed by hook logic.
+- `claimRefund` is intentionally not hookable, but it still requires pending provider claims to be resolved first.
+- `approveClaim` and `rejectClaim` are hookable resolution actions; trusted hooks can gate them like other business transitions.
+- When `submit` supersedes a pending claim, the pending claim is cleared before submit hooks run so hooks observe the post-supersede state.
 - A `Submitted` job cannot be force-refunded for `EVALUATION_GRACE_PERIOD` (1 hour) past `expiredAt`, giving the evaluator a censorship-resistant window to call `complete` or `reject`.
-- A `Funded` job with a pending provider claim cannot be force-refunded until the claim is approved or rejected.
+- A `Funded` job with a pending provider claim cannot be force-refunded until the claim is approved or rejected; if all parties stay idle, escrow remains parked.

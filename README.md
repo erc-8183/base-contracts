@@ -60,9 +60,11 @@ contracts/
 - **Payment token allowlist** — only admin-vetted ERC-20s can be used as payment tokens
 - **Fee-on-transfer / rebasing rejection** — `fund` snapshots the contract balance and reverts if the received amount differs from the budget
 - **Evaluator grace period** — after expiry, a Submitted job cannot be force-refunded for `EVALUATION_GRACE_PERIOD` (1 hour), giving the evaluator time to complete or reject
-- **Pending claim resolution** — after expiry, a Funded job with a pending provider claim cannot be force-refunded until the claim is approved or rejected
+- **Claim settlement fees** — direct settlements and approved claims both use the configured platform/evaluator fee split for the settled delta
+- **Pending claim resolution** — after expiry, a Funded job with a pending provider claim cannot be force-refunded until the claim is approved, rejected, or withdrawn; if all parties stay idle, escrow remains parked
+- **Claim replay guard** — rejected claim hashes stay consumed, so providers must vary the deliverable or `optParams` to refile
 - **Authorization extension** — `ERC8183WithAuthorization` uses the base `ERC8183` EIP-712 domain so relayed entrypoints extend the same protocol identity
-- **Hook safety** — `claimRefund` is intentionally not hookable so refunds cannot be blocked
+- **Hook safety** — `claimRefund` is intentionally not hookable; pending claims must be resolved before refund
 
 See [docs/01-architecture.md](docs/01-architecture.md) for state machine and sequence diagrams.
 

@@ -121,6 +121,13 @@ contract ERC8183WithAuthorizationTest is Test {
         return bytes32((uint256(uint160(signer)) << 96) | uint256(nonce));
     }
 
+    function _assertPublicTypehash(string memory signature, bytes32 expected) internal view {
+        (bool ok, bytes memory data) = address(core).staticcall(abi.encodeWithSignature(signature));
+
+        assertTrue(ok);
+        assertEq(abi.decode(data, (bytes32)), expected);
+    }
+
     function _hashBytes(bytes memory value) internal pure returns (bytes32) {
         return keccak256(value);
     }
@@ -443,6 +450,13 @@ contract ERC8183WithAuthorizationTest is Test {
 
     function test_domainSeparatorUsesERC8183ProtocolDomain() public view {
         assertEq(core.DOMAIN_SEPARATOR(), _domainSeparator());
+    }
+
+    function test_claimAuthorizationTypehashesArePublic() public view {
+        _assertPublicTypehash("SUBMIT_CLAIM_AUTHORIZATION_TYPEHASH()", SUBMIT_CLAIM_AUTHORIZATION_TYPEHASH);
+        _assertPublicTypehash("SETTLE_CLAIM_AUTHORIZATION_TYPEHASH()", SETTLE_CLAIM_AUTHORIZATION_TYPEHASH);
+        _assertPublicTypehash("APPROVE_CLAIM_AUTHORIZATION_TYPEHASH()", APPROVE_CLAIM_AUTHORIZATION_TYPEHASH);
+        _assertPublicTypehash("REJECT_CLAIM_AUTHORIZATION_TYPEHASH()", REJECT_CLAIM_AUTHORIZATION_TYPEHASH);
     }
 
     function test_upgradeInitializerSetsERC8183DomainForAuthorizationExtension() public {

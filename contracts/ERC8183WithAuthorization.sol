@@ -28,16 +28,16 @@ contract ERC8183WithAuthorization is ERC8183 {
     bytes32 public constant REJECT_AUTHORIZATION_TYPEHASH = keccak256(
         "RejectAuthorization(address signer,uint256 jobId,bytes32 reason,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
-    bytes32 private constant SUBMIT_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
+    bytes32 public constant SUBMIT_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
         "SubmitClaimAuthorization(address signer,uint256 jobId,uint256 cumulativeAmount,bytes32 deliverable,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
-    bytes32 private constant SETTLE_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
+    bytes32 public constant SETTLE_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
         "SettleClaimAuthorization(address signer,uint256 jobId,uint256 cumulativeAmount,bytes32 deliverable,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
-    bytes32 private constant APPROVE_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
+    bytes32 public constant APPROVE_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
         "ApproveClaimAuthorization(address signer,uint256 jobId,uint256 cumulativeAmount,bytes32 deliverable,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
-    bytes32 private constant REJECT_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
+    bytes32 public constant REJECT_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
         "RejectClaimAuthorization(address signer,uint256 jobId,uint256 cumulativeAmount,bytes32 deliverable,bytes32 reason,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
 

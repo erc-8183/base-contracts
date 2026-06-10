@@ -2,13 +2,43 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
+import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 
 import {ERC8183} from "../contracts/ERC8183.sol";
+import {IERC8183Hook} from "../contracts/IERC8183Hook.sol";
 import {MockUSDC} from "../contracts/mocks/MockUSDC.sol";
 import {MockCBBTC} from "../contracts/mocks/MockCBBTC.sol";
 import {MockFeeOnTransferToken} from "../contracts/mocks/MockFeeOnTransferToken.sol";
+
+contract PendingClaimObserverHook is IERC8183Hook {
+    ERC8183 immutable core;
+
+    bytes32 public beforeSubmitPendingClaimHash;
+    bytes32 public afterSubmitPendingClaimHash;
+
+    constructor(ERC8183 core_) {
+        core = core_;
+    }
+
+    function beforeAction(uint256 jobId, bytes4 selector, bytes calldata) external override {
+        if (selector == ERC8183.submit.selector) {
+            beforeSubmitPendingClaimHash = core.pendingClaimHash(jobId);
+        }
+    }
+
+    function afterAction(uint256 jobId, bytes4 selector, bytes calldata) external override {
+        if (selector == ERC8183.submit.selector) {
+            afterSubmitPendingClaimHash = core.pendingClaimHash(jobId);
+        }
+    }
+
+    function supportsInterface(bytes4 interfaceId) external pure override returns (bool) {
+        return interfaceId == type(IERC8183Hook).interfaceId || interfaceId == type(IERC165).interfaceId;
+    }
+}
 
 /// @notice Image Generation — E2E flow (no hook, core-only payment).
 ///         Mirrors the original Hardhat suite in test/ERC8183.test.js.
@@ -85,6 +115,14 @@ contract ERC8183Test is Test {
         returns (bytes32)
     {
         return keccak256(abi.encode(amount, deliverable, keccak256(optParams)));
+    }
+
+    function _hasPaymentReleasedLog(Vm.Log[] memory entries) internal pure returns (bool) {
+        bytes32 topic = keccak256("PaymentReleased(uint256,address,uint256)");
+        for (uint256 i = 0; i < entries.length; i++) {
+            if (entries[i].topics.length > 0 && entries[i].topics[0] == topic) return true;
+        }
+        return false;
     }
 
     // ──────────────────────────────────────────────────────────
@@ -420,6 +458,22 @@ contract ERC8183Test is Test {
         assertEq(usdc.balanceOf(address(core)), TEN_USDC);
     }
 
+    function test_claims_SettleClaimSkipsPaymentReleasedWhenNetZero() public {
+        uint256 jobId = _createFundedJob(TWENTY_USDC);
+
+        vm.prank(deployer);
+        core.setEvaluatorFee(10_000);
+
+        vm.recordLogs();
+        vm.prank(client);
+        core.settleClaim(jobId, TEN_USDC, EMPTY_DELIVERABLE, "");
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+
+        assertFalse(_hasPaymentReleasedLog(entries));
+        assertEq(usdc.balanceOf(evaluator), TEN_USDC);
+        assertEq(usdc.balanceOf(provider), 0);
+    }
+
     function test_claims_NonzeroDeliverableRecordsPendingHashAndSettlesOnApproval() public {
         uint256 jobId = _createFundedJob(TWENTY_USDC);
         bytes32 deliverable = bytes32("milestone-1");
@@ -506,6 +560,30 @@ contract ERC8183Test is Test {
         assertEq(core.getJob(jobId).settledAmount, 0);
         assertEq(usdc.balanceOf(provider), TWENTY_USDC);
         assertEq(usdc.balanceOf(address(core)), 0);
+    }
+
+    function test_claims_SubmitClearsPendingClaimBeforeHook() public {
+        PendingClaimObserverHook hook = new PendingClaimObserverHook(core);
+        vm.prank(deployer);
+        core.setHookWhitelist(address(hook), true);
+
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, _futureExpiry(), "hooked claim job", address(hook), 0);
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, TWENTY_USDC, "");
+
+        bytes32 claimDeliverable = bytes32("milestone-1");
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, claimDeliverable, "");
+        assertEq(core.pendingClaimHash(jobId), _claimBindingHash(TEN_USDC, claimDeliverable, ""));
+
+        vm.prank(provider);
+        core.submit(jobId, bytes32("final"), "");
+
+        assertEq(hook.beforeSubmitPendingClaimHash(), bytes32(0));
+        assertEq(hook.afterSubmitPendingClaimHash(), bytes32(0));
     }
 
     function test_claims_ProviderCanRejectOwnPendingClaimAndSubmitNewClaim() public {

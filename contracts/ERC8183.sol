@@ -643,14 +643,15 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         if (actor != job.provider) revert Unauthorized();
 
         bytes memory data = abi.encode(actor, deliverable, optParams);
-        _beforeHook(job.hook, jobId, this.submit.selector, data);
-
         if (pendingClaimHash[jobId] != bytes32(0)) {
             // Final submit supersedes any pending milestone claim: the provider is
-            // moving to the normal completion path for the full remaining escrow.
+            // moving to the normal completion path for the full remaining escrow,
+            // and submit hooks should observe that post-supersede claim state.
             delete pendingClaimHash[jobId];
             emit ClaimRejected(jobId, actor, bytes32("superseded-by-submit"));
         }
+        _beforeHook(job.hook, jobId, this.submit.selector, data);
+
         job.status = JobStatus.Submitted;
         job.submittedAt = uint48(block.timestamp);
         emit JobSubmitted(jobId, actor, deliverable);
@@ -815,8 +816,8 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         }
         if (net > 0) {
             token.safeTransfer(job.provider, net);
+            emit PaymentReleased(jobId, job.provider, net);
         }
-        emit PaymentReleased(jobId, job.provider, net);
     }
 
     function _claimHash(
