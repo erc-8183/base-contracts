@@ -586,6 +586,27 @@ contract ERC8183Test is Test {
         assertEq(hook.afterSubmitPendingClaimHash(), bytes32(0));
     }
 
+    function test_claims_RejectFundedJobClearsPendingClaim() public {
+        uint256 jobId = _createFundedJob(TWENTY_USDC);
+        bytes32 deliverable = bytes32("milestone-1");
+        bytes32 reason = bytes32("job-rejected");
+
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, deliverable, "");
+        assertEq(core.pendingClaimHash(jobId), _claimBindingHash(TEN_USDC, deliverable, ""));
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit ClaimRejected(jobId, evaluator, reason);
+        vm.prank(evaluator);
+        core.reject(jobId, reason, "");
+
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Rejected));
+        assertEq(core.pendingClaimHash(jobId), bytes32(0));
+        assertEq(usdc.balanceOf(client), TWENTY_USDC);
+        assertEq(usdc.balanceOf(provider), 0);
+        assertEq(usdc.balanceOf(address(core)), 0);
+    }
+
     function test_claims_ProviderCanRejectOwnPendingClaimAndSubmitNewClaim() public {
         uint256 jobId = _createFundedJob(TWENTY_USDC);
         bytes32 deliverable = bytes32("milestone-1");

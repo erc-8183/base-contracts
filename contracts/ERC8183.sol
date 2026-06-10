@@ -747,6 +747,12 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         }
 
         bytes memory data = abi.encode(actor, reason, optParams);
+        if (pendingClaimHash[jobId] != bytes32(0)) {
+            // Terminal job rejection also rejects any pending milestone claim, so
+            // hooks and indexers observe a closed claim lifecycle.
+            delete pendingClaimHash[jobId];
+            emit ClaimRejected(jobId, actor, reason);
+        }
         _beforeHook(job.hook, jobId, this.reject.selector, data);
 
         JobStatus prev = job.status;
