@@ -99,7 +99,7 @@ contract ERC8183WithAuthorizationTest is Test {
         return keccak256(
             abi.encode(
                 EIP712_DOMAIN_TYPEHASH,
-                keccak256(bytes("ERC8183WithAuthorization")),
+                keccak256(bytes("ERC8183")),
                 keccak256(bytes("1")),
                 block.chainid,
                 address(core)
@@ -406,6 +406,38 @@ contract ERC8183WithAuthorizationTest is Test {
         bytes memory sig = _signComplete(evaluatorPk, evaluator, jobId, reason, "", nonce, deadline);
         vm.prank(relayer);
         core.completeWithAuthorization(jobId, reason, "", _auth(evaluator, nonce, deadline, sig));
+    }
+
+    function test_domainSeparatorUsesERC8183ProtocolDomain() public view {
+        assertEq(core.DOMAIN_SEPARATOR(), _domainSeparator());
+    }
+
+    function test_upgradeInitializerSetsERC8183DomainForAuthorizationExtension() public {
+        vm.startPrank(deployer);
+        ERC8183 baseImpl = new ERC8183();
+        ERC1967Proxy proxy =
+            new ERC1967Proxy(address(baseImpl), abi.encodeCall(ERC8183.initialize, (deployer, deployer)));
+        ERC8183 base = ERC8183(address(proxy));
+        base.setPaymentTokenAllowed(address(usdc), true);
+
+        ERC8183WithAuthorization authImpl = new ERC8183WithAuthorization();
+        base.upgradeToAndCall(
+            address(authImpl), abi.encodeCall(ERC8183WithAuthorization.initializeAuthorizationV2, ())
+        );
+        vm.stopPrank();
+
+        core = ERC8183WithAuthorization(address(proxy));
+        vm.prank(client);
+        usdc.approve(address(core), TWENTY_USDC);
+
+        assertEq(core.DOMAIN_SEPARATOR(), _domainSeparator());
+
+        uint256 deadline = _deadline();
+        uint256 jobId =
+            _relayCreateJob(client, clientPk, provider, evaluator, _futureExpiry(), "upgraded auth job", 51, deadline);
+
+        assertEq(core.getJob(jobId).client, client);
+        assertTrue(core.authorizationNonceUsed(_packNonce(client, 51)));
     }
 
     function test_relaysFullSignedJobFlow() public {

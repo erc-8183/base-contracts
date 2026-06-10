@@ -480,4 +480,57 @@ contract ERC8183Test is Test {
         vm.prank(client);
         core.settleClaim(jobId, TEN_USDC, deliverable, "");
     }
+
+    function test_claims_PendingClaimBlocksRefundDuringResolutionGracePeriod() public {
+        uint48 expiry = _futureExpiry();
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, expiry, "pending claim grace", address(0), 0);
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, TWENTY_USDC, "");
+
+        bytes32 deliverable = bytes32("milestone-1");
+        vm.warp(uint256(expiry) - 1);
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, deliverable, "");
+
+        vm.warp(uint256(expiry) + 1);
+        vm.expectRevert(ERC8183.GracePeriodActive.selector);
+        core.claimRefund(jobId);
+
+        vm.prank(evaluator);
+        core.approveClaim(jobId, TEN_USDC, deliverable, "");
+
+        assertEq(core.getJob(jobId).settledAmount, TEN_USDC);
+        assertEq(core.pendingClaimHash(jobId), bytes32(0));
+        assertEq(usdc.balanceOf(provider), TEN_USDC);
+        assertEq(usdc.balanceOf(address(core)), TEN_USDC);
+    }
+
+    function test_claims_PendingClaimStalesAfterResolutionGracePeriodAndRefundsRemainingEscrow() public {
+        uint48 expiry = _futureExpiry();
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, expiry, "pending claim stale", address(0), 0);
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, TWENTY_USDC, "");
+
+        bytes32 deliverable = bytes32("milestone-1");
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, deliverable, "");
+
+        vm.warp(uint256(expiry) + 1 hours + 1);
+        vm.expectRevert(ERC8183.WrongStatus.selector);
+        vm.prank(evaluator);
+        core.approveClaim(jobId, TEN_USDC, deliverable, "");
+
+        core.claimRefund(jobId);
+
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Expired));
+        assertEq(core.pendingClaimHash(jobId), bytes32(0));
+        assertEq(usdc.balanceOf(client), TWENTY_USDC);
+        assertEq(usdc.balanceOf(address(core)), 0);
+    }
 }

@@ -42,6 +42,7 @@ When `hook == address(0)`, the contract operates as a standalone job escrow with
 ```
 contracts/
 ├── ERC8183.sol                 # Core state machine, escrow, fees, hooks
+├── ERC8183WithAuthorization.sol # EIP-712 authorization extension for relayed calls
 ├── IERC8183Hook.sol            # Hook interface (beforeAction/afterAction)
 └── mocks/
     ├── MockUSDC.sol            # Test ERC20, 6 decimals
@@ -59,6 +60,8 @@ contracts/
 - **Payment token allowlist** — only admin-vetted ERC-20s can be used as payment tokens
 - **Fee-on-transfer / rebasing rejection** — `fund` snapshots the contract balance and reverts if the received amount differs from the budget
 - **Evaluator grace period** — after expiry, a Submitted job cannot be force-refunded for `EVALUATION_GRACE_PERIOD` (1 hour), giving the evaluator time to complete or reject
+- **Claim resolution grace period** — after expiry, a Funded job with a pending provider claim cannot be force-refunded for `CLAIM_RESOLUTION_GRACE_PERIOD` (1 hour), giving the client or evaluator time to approve or reject
+- **Authorization extension** — `ERC8183WithAuthorization` uses the base `ERC8183` EIP-712 domain so relayed entrypoints extend the same protocol identity
 - **Hook safety** — `claimRefund` is intentionally not hookable so refunds cannot be blocked
 
 See [docs/01-architecture.md](docs/01-architecture.md) for state machine and sequence diagrams.

@@ -67,7 +67,12 @@ contract ERC8183WithAuthorization is ERC8183 {
     error InvalidAuthorizationSignature();
 
     function initialize(address treasury_, address admin_) public override initializer {
-        __ERC8183_init(treasury_, admin_, "ERC8183WithAuthorization", "1");
+        __ERC8183_init(treasury_, admin_, EIP712_NAME, EIP712_VERSION);
+    }
+
+    /// @notice Initializes EIP-712 storage when adding authorization support to an existing ERC8183 proxy.
+    function initializeAuthorizationV2() public reinitializer(2) onlyRole(DEFAULT_ADMIN_ROLE) {
+        __EIP712_init(EIP712_NAME, EIP712_VERSION);
     }
 
     function DOMAIN_SEPARATOR() external view returns (bytes32) {

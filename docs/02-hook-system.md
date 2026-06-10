@@ -31,6 +31,7 @@ interface IERC8183Hook is IERC165 {
 | `fund`        | Yes     | before + after |
 | `submit`      | Yes     | before + after |
 | `submitClaim` | Yes     | before + after |
+| `settleClaim` | Yes     | before + after |
 | `approveClaim` | Yes   | before + after |
 | `rejectClaim` | Yes    | before + after |
 | `complete`    | Yes     | before + after |
@@ -47,6 +48,7 @@ As produced by `ERC8183`:
 | `fund`      | `abi.encode(address caller, bytes optParams)`                                |
 | `submit`    | `abi.encode(address caller, bytes32 deliverable, bytes optParams)`           |
 | `submitClaim` | `abi.encode(address caller, uint256 cumulativeAmount, bytes32 deliverable, bytes optParams)` |
+| `settleClaim` | `abi.encode(address caller, uint256 cumulativeAmount, bytes32 deliverable, bytes optParams)` |
 | `approveClaim` | `abi.encode(address caller, uint256 cumulativeAmount, bytes32 deliverable, bytes optParams)` |
 | `rejectClaim` | `abi.encode(address caller, uint256 cumulativeAmount, bytes32 deliverable, bytes32 reason, bytes optParams)` |
 | `complete`  | `abi.encode(address caller, bytes32 reason, bytes optParams)`                |
@@ -146,3 +148,4 @@ function fund(
 - `afterAction` reverts roll back the whole transaction — hook state must stay consistent with core state.
 - `claimRefund` is intentionally not hookable — refunds cannot be blocked or delayed by hook logic.
 - A `Submitted` job cannot be force-refunded for `EVALUATION_GRACE_PERIOD` (1 hour) past `expiredAt`, giving the evaluator a censorship-resistant window to call `complete` or `reject`.
+- A `Funded` job with a pending provider claim cannot be force-refunded for `CLAIM_RESOLUTION_GRACE_PERIOD` (1 hour) past `expiredAt`, giving the client or evaluator a bounded window to call `approveClaim` or `rejectClaim`.
