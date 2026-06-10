@@ -485,11 +485,14 @@ contract ERC8183Test is Test {
     function test_claims_SubmitClearsPendingClaimAndCompletesFullEscrow() public {
         uint256 jobId = _createFundedJob(TWENTY_USDC);
         bytes32 claimDeliverable = bytes32("milestone-1");
+        bytes32 supersededReason = bytes32("superseded-by-submit");
 
         vm.prank(provider);
         core.submitClaim(jobId, TEN_USDC, claimDeliverable, "");
         assertEq(core.pendingClaimHash(jobId), _claimBindingHash(TEN_USDC, claimDeliverable, ""));
 
+        vm.expectEmit(true, true, true, true, address(core));
+        emit ClaimRejected(jobId, provider, supersededReason);
         vm.prank(provider);
         core.submit(jobId, bytes32("final"), "");
 

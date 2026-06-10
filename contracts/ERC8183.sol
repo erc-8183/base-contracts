@@ -200,7 +200,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         uint256 delta,
         bytes32 deliverable
     );
-    /// @notice Emitted when a pending claim is rejected by the client or evaluator
+    /// @notice Emitted when a pending claim is rejected, withdrawn, or superseded
     event ClaimRejected(
         uint256 indexed jobId,
         address indexed rejector,
@@ -643,7 +643,12 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         bytes memory data = abi.encode(actor, deliverable, optParams);
         _beforeHook(job.hook, jobId, this.submit.selector, data);
 
-        if (pendingClaimHash[jobId] != bytes32(0)) delete pendingClaimHash[jobId];
+        if (pendingClaimHash[jobId] != bytes32(0)) {
+            // Final submit supersedes any pending milestone claim: the provider is
+            // moving to the normal completion path for the full remaining escrow.
+            delete pendingClaimHash[jobId];
+            emit ClaimRejected(jobId, actor, bytes32("superseded-by-submit"));
+        }
         job.status = JobStatus.Submitted;
         job.submittedAt = uint48(block.timestamp);
         emit JobSubmitted(jobId, actor, deliverable);
