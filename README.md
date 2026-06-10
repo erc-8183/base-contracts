@@ -60,7 +60,7 @@ contracts/
 - **Payment token allowlist** — only admin-vetted ERC-20s can be used as payment tokens
 - **Fee-on-transfer / rebasing rejection** — `fund` snapshots the contract balance and reverts if the received amount differs from the budget
 - **Evaluator grace period** — after expiry, a Submitted job cannot be force-refunded for `EVALUATION_GRACE_PERIOD` (1 hour), giving the evaluator time to complete or reject
-- **Claim resolution grace period** — after expiry, a Funded job with a pending provider claim cannot be force-refunded for `CLAIM_RESOLUTION_GRACE_PERIOD` (1 hour), giving the client or evaluator time to approve or reject
+- **Pending claim resolution** — after expiry, a Funded job with a pending provider claim cannot be force-refunded until the claim is approved or rejected
 - **Authorization extension** — `ERC8183WithAuthorization` uses the base `ERC8183` EIP-712 domain so relayed entrypoints extend the same protocol identity
 - **Hook safety** — `claimRefund` is intentionally not hookable so refunds cannot be blocked
 

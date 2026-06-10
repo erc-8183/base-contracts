@@ -148,4 +148,4 @@ function fund(
 - `afterAction` reverts roll back the whole transaction — hook state must stay consistent with core state.
 - `claimRefund` is intentionally not hookable — refunds cannot be blocked or delayed by hook logic.
 - A `Submitted` job cannot be force-refunded for `EVALUATION_GRACE_PERIOD` (1 hour) past `expiredAt`, giving the evaluator a censorship-resistant window to call `complete` or `reject`.
-- A `Funded` job with a pending provider claim cannot be force-refunded for `CLAIM_RESOLUTION_GRACE_PERIOD` (1 hour) past `expiredAt`, giving the client or evaluator a bounded window to call `approveClaim` or `rejectClaim`.
+- A `Funded` job with a pending provider claim cannot be force-refunded until the claim is approved or rejected.

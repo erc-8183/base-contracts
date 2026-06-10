@@ -530,10 +530,10 @@ contract ERC8183Test is Test {
         assertEq(core.pendingClaimHash(jobId), _claimBindingHash(TEN_USDC, bytes32("milestone-2"), ""));
     }
 
-    function test_claims_PendingClaimBlocksRefundDuringResolutionGracePeriod() public {
+    function test_claims_PendingClaimBlocksRefundUntilResolved() public {
         uint48 expiry = _futureExpiry();
         vm.prank(client);
-        uint256 jobId = core.createJob(provider, evaluator, expiry, "pending claim grace", address(0), 0);
+        uint256 jobId = core.createJob(provider, evaluator, expiry, "pending claim block", address(0), 0);
         vm.prank(provider);
         core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
         vm.prank(client);
@@ -544,7 +544,7 @@ contract ERC8183Test is Test {
         vm.prank(provider);
         core.submitClaim(jobId, TEN_USDC, deliverable, "");
 
-        vm.warp(uint256(expiry) + 1);
+        vm.warp(uint256(expiry) + 30 days);
         vm.expectRevert(ERC8183.GracePeriodActive.selector);
         core.claimRefund(jobId);
 
@@ -557,10 +557,10 @@ contract ERC8183Test is Test {
         assertEq(usdc.balanceOf(address(core)), TEN_USDC);
     }
 
-    function test_claims_PendingClaimStalesAfterResolutionGracePeriodAndRefundsRemainingEscrow() public {
+    function test_claims_RejectPendingClaimAfterExpiryThenRefundsRemainingEscrow() public {
         uint48 expiry = _futureExpiry();
         vm.prank(client);
-        uint256 jobId = core.createJob(provider, evaluator, expiry, "pending claim stale", address(0), 0);
+        uint256 jobId = core.createJob(provider, evaluator, expiry, "pending claim reject", address(0), 0);
         vm.prank(provider);
         core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
         vm.prank(client);
@@ -570,10 +570,12 @@ contract ERC8183Test is Test {
         vm.prank(provider);
         core.submitClaim(jobId, TEN_USDC, deliverable, "");
 
-        vm.warp(uint256(expiry) + 1 hours + 1);
-        vm.expectRevert(ERC8183.WrongStatus.selector);
-        vm.prank(evaluator);
-        core.approveClaim(jobId, TEN_USDC, deliverable, "");
+        vm.warp(uint256(expiry) + 30 days);
+        vm.expectRevert(ERC8183.GracePeriodActive.selector);
+        core.claimRefund(jobId);
+
+        vm.prank(provider);
+        core.rejectClaim(jobId, TEN_USDC, deliverable, bytes32("withdrawn"), "");
 
         core.claimRefund(jobId);
 

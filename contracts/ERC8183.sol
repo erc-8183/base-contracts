@@ -73,9 +73,6 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     /// @notice Grace period after expiry during which only the evaluator can finalize a Submitted job.
     ///         Prevents third-party censorship of providers who submitted work before expiry.
     uint256 public constant EVALUATION_GRACE_PERIOD = 1 hours;
-    /// @notice Grace period after expiry during which an existing provider claim can be approved or rejected.
-    ///         New claims remain invalid after expiry.
-    uint256 public constant CLAIM_RESOLUTION_GRACE_PERIOD = 1 hours;
 
     /// @notice Platform fee in basis points (10000 = 100%)
     uint256 public platformFeeBP; // 10000 = 100%
@@ -774,14 +771,13 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         if (job.status == JobStatus.Submitted) {
             if (block.timestamp < job.expiredAt + EVALUATION_GRACE_PERIOD) revert GracePeriodActive();
         } else if (hasPendingClaim) {
-            if (block.timestamp < job.expiredAt + CLAIM_RESOLUTION_GRACE_PERIOD) revert GracePeriodActive();
+            revert GracePeriodActive();
         } else {
             if (block.timestamp < job.expiredAt) revert WrongStatus();
         }
 
         JobStatus prev = job.status;
         job.status = JobStatus.Expired;
-        if (hasPendingClaim) delete pendingClaimHash[jobId];
 
         uint256 refundAmount = job.budget - job.settledAmount;
         if (refundAmount > 0 && (prev == JobStatus.Funded || prev == JobStatus.Submitted)) {
@@ -928,7 +924,6 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         bytes32 stored = pendingClaimHash[jobId];
         if (stored == bytes32(0)) revert NoPendingClaim();
         if (stored != _claimHash(cumulativeAmount, deliverable, keccak256(optParams))) revert NoPendingClaim();
-        if (block.timestamp >= job.expiredAt + CLAIM_RESOLUTION_GRACE_PERIOD) revert WrongStatus();
         if (cumulativeAmount <= job.settledAmount) revert NoNewSettlement();
         if (cumulativeAmount > job.budget) revert ExceedsBudget();
 
@@ -974,7 +969,6 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         bytes32 stored = pendingClaimHash[jobId];
         if (stored == bytes32(0)) revert NoPendingClaim();
         if (stored != _claimHash(cumulativeAmount, deliverable, keccak256(optParams))) revert NoPendingClaim();
-        if (block.timestamp >= job.expiredAt + CLAIM_RESOLUTION_GRACE_PERIOD) revert WrongStatus();
 
         bytes memory data = abi.encode(actor, cumulativeAmount, deliverable, reason, optParams);
         _beforeHook(job.hook, jobId, this.rejectClaim.selector, data);

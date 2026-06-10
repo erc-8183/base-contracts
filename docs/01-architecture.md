@@ -15,9 +15,9 @@ stateDiagram-v2
     Funded --> Funded: submitClaim()\n[provider direct or authorization]\npending claim
     Funded --> Funded: settleClaim()\n[client direct or authorization]\n💸 delta released
     Funded --> Funded: approveClaim()\n[client/evaluator direct or authorization]\n💸 delta released
-    Funded --> Funded: rejectClaim()\n[client/evaluator direct or authorization]\npending cleared
+    Funded --> Funded: rejectClaim()\n[client/evaluator/provider direct or authorization]\npending cleared
     Funded --> Rejected: reject()\n[evaluator only]\n↩️ client refunded
-    Funded --> Expired: claimRefund()\n[after expiry]\n[after claim grace if pending]\n↩️ client refunded
+    Funded --> Expired: claimRefund()\n[after expiry]\n[no pending claim]\n↩️ client refunded
 
     Submitted --> Completed: complete(reason)\n[evaluator only]\n💸 provider paid
     Submitted --> Rejected: reject(reason)\n[evaluator only]\n↩️ client refunded
@@ -30,7 +30,7 @@ stateDiagram-v2
 
 Claims have separate slow and fast paths while the job remains `Funded`. In the slow path, the provider calls `submitClaim` or signs `submitClaimWithAuthorization` before expiry to record a pending nonzero-deliverable claim. The client or evaluator then approves or rejects it, directly or through `approveClaimWithAuthorization` / `rejectClaimWithAuthorization`; the provider can also call or sign `rejectClaim` to withdraw their own pending claim. In the fast path, the client calls `settleClaim` or signs `settleClaimWithAuthorization` before expiry to release the new cumulative delta immediately. Both paths settle only `cumulativeAmount - settledAmount`. If the provider later calls `submit` for the final deliverable, that submission supersedes any pending claim and clears it because the provider is requesting the full remaining escrow through the normal completion path.
 
-After expiry, `claimRefund` is callable by anyone. For `Submitted` jobs, it is gated by an additional `EVALUATION_GRACE_PERIOD` (1 hour) so that an evaluator who is mid-review cannot be censored by a third-party refund call. For pending provider claims, refund is gated by `CLAIM_RESOLUTION_GRACE_PERIOD` (1 hour); during that window no new claims can be opened, but the existing claim can still be approved or rejected. Refunds, claim settlements, and final completion only use the unsettled escrow balance, so funds released by claims are not double-paid or double-refunded.
+After expiry, `claimRefund` is callable by anyone. For `Submitted` jobs, it is gated by an additional `EVALUATION_GRACE_PERIOD` (1 hour) so that an evaluator who is mid-review cannot be censored by a third-party refund call. A `Funded` job with a pending provider claim cannot be refunded until that claim is approved or rejected; this forces explicit resolution before the remaining escrow can be closed out. Refunds, claim settlements, and final completion only use the unsettled escrow balance, so funds released by claims are not double-paid or double-refunded.
 
 `ERC8183WithAuthorization` uses the same EIP-712 domain as the base protocol: name `ERC8183`, version `1`. The authorization contract extends ERC8183 entrypoints rather than creating a separate signing domain; upgraded proxies can call `initializeAuthorizationV2()` during `upgradeToAndCall` to initialize EIP-712 storage when the prior implementation did not already do so.
 
