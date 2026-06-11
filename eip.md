@@ -13,11 +13,13 @@ requires: 20
 
 ## Abstract
 
-This specification defines the **Agentic Commerce Protocol**: a **job** with escrowed budget, four states (Open → Funded → Submitted → Terminal), and an **evaluator** who alone may mark the job completed. The client funds the job; the provider submits work; the evaluator attests completion or rejection once submitted (or the evaluator rejects while Funded before submission, or the client rejects while Open, or the job expires and the client is refunded). Optional attestation **reason** (e.g. hash) on complete/reject enables audit and composition with reputation (e.g. [ERC-8004](./eip-8004.md)).
+This specification defines the **Agentic Commerce Protocol**: a **job** with escrowed budget, four states (Open → Funded → Submitted → Terminal), and an **evaluator** who alone may mark the job completed. The client funds the job; the provider submits work; the evaluator attests completion or rejection once submitted (or the evaluator rejects while Funded before submission, or the client rejects while Open, or the job expires and the client is refunded). While Funded, the client may also settle partial amounts to the provider directly, or approve provider-submitted **claims**, with cumulative settlement accounting ensuring total payouts never exceed the escrowed budget. Optional attestation **reason** (e.g. hash) on complete/reject enables audit and composition with reputation (e.g. [ERC-8004](./eip-8004.md)).
 
 ## Motivation
 
 Many use cases need only: client locks funds, provider submits work, one attester (evaluator) signals "done" and triggers payment—or client rejects or timeout triggers refund. The Agentic Commerce Protocol specifies that minimal surface so implementations stay small and composable. The evaluator can be the client (e.g. `evaluator = client` at creation) when there is no third-party attester.
+
+Agentic work is often metered or delivered in milestones — pay-per-call inference, streaming data, staged deliverables. Such work needs to be paid as it progresses, not only at terminal completion. This specification therefore includes an incremental **claim settlement** ledger over the escrowed budget: the client may settle partial amounts at any time while the job is Funded, and the provider may file claims for the client or evaluator to approve. The one-shot escrow remains the degenerate case — a job whose claim-settlement functions are never called behaves exactly as the minimal flow above.
 
 ## Specification
 
@@ -31,16 +33,16 @@ A **job** has exactly one of six states:
 | State         | Meaning                                                                                                           |
 | ------------- | ----------------------------------------------------------------------------------------------------------------- |
 | **Open**      | Created; budget not yet set or not yet funded. Client may set budget, then fund or reject.                        |
-| **Funded**    | Budget escrowed. Provider may submit work; evaluator may reject. After `expiredAt`, anyone may trigger refund.    |
-| **Submitted** | Provider has submitted work. Only evaluator may complete or reject. After `expiredAt`, anyone may trigger refund. |
-| **Completed** | Terminal. Escrow released to provider (minus optional platform fee).                                              |
-| **Rejected**  | Terminal. Escrow refunded to client.                                                                              |
-| **Expired**   | Terminal. Same as Rejected; escrow refunded to client.                                                            |
+| **Funded**    | Budget escrowed. Provider may submit work or file a settlement claim; client may settle partial amounts directly or approve/reject a pending claim; evaluator may approve/reject a pending claim or reject the job. After `expiredAt`, anyone may trigger refund of the unsettled remainder (`budget - settledAmount`, see Job Data), provided no claim is pending. |
+| **Submitted** | Provider has submitted work. Only evaluator may complete or reject. After `expiredAt + EVALUATION_GRACE_PERIOD`, anyone may trigger refund. |
+| **Completed** | Terminal. Unsettled remainder released to provider (minus optional fees).                                         |
+| **Rejected**  | Terminal. Unsettled remainder refunded to client.                                                                 |
+| **Expired**   | Terminal. Same as Rejected; unsettled remainder refunded to client.                                               |
 
 
 Allowed transitions:
 
-- **Open → Funded**: Client or provider calls `setBudget(jobId, token, amount)` to agree on price and payment token, then client calls `fund(jobId, expectedBudget)`; contract pulls `job.budget` of the job's payment token from client into escrow.
+- **Open → Funded**: Provider calls `setBudget(jobId, token, amount)` to propose the price and payment token, then client accepts by calling `fund(jobId, expectedBudget)`; contract pulls `job.budget` of the job's payment token from client into escrow.
 - **Open → Rejected**: Client or provider calls `reject(jobId, reason?)`.
 - **Open → Expired**: When `block.timestamp >= job.expiredAt`, anyone may call `claimRefund(jobId)`; contract sets state to Expired. No refund to client as job has not been funded yet.
 - **Funded → Submitted**: Provider calls `submit(jobId, deliverable)`; signals that work has been completed and is ready for evaluation.
@@ -52,11 +54,13 @@ Allowed transitions:
 
 No other transitions are valid.
 
+Settlement claims (see Claim Settlement below) do not introduce job states: all claim activity occurs while the job is Funded, and at most one claim is pending per job at any time.
+
 ### Roles
 
-- **Client**: Creates job (with description), may set provider via `setProvider(jobId, provider, agentId?)` when job was created with no provider, funds escrow with `fund(jobId, expectedBudget)`, may reject when status is Open. Receives refund on Rejected/Expired. **MUST NOT be the provider** — an address cannot hold both client and provider roles on the same job.
-- **Provider**: Set at creation or later via `setProvider`. Calls `setBudget(jobId, token, amount)` to propose a price and payment token. Calls `submit(jobId, deliverable)` when work is done to move the job from Funded to Submitted for evaluation. May reject when status is Open (e.g. to decline the engagement before any escrow is locked). Receives payment when job is Completed. Does not call `complete` or `reject` once the job has been funded.
-- **Evaluator**: Single address per job, set at creation. When status is Submitted, **only** the evaluator MAY call `complete(jobId, reason?)` or `reject(jobId, reason?)`. When status is Funded, the evaluator MAY call `reject(jobId, reason?)` (before submission). MAY be the client (e.g. `evaluator = client`) so the client can complete or reject the job without a third party, or MAY be a **smart contract** that performs arbitrary checks (e.g. verifying a zero‑knowledge proof or aggregating off‑chain signals) before deciding whether to call `complete` or `reject` on the job. **MUST NOT be the provider** — an address cannot hold both roles on the same job.
+- **Client**: Creates job (with description), may set provider via `setProvider(jobId, provider, agentId?)` when job was created with no provider, funds escrow with `fund(jobId, expectedBudget)`, may reject when status is Open. While Funded, may settle partial amounts directly via `settleClaim` and may approve or reject a pending provider claim. Receives refund of the unsettled remainder on Rejected/Expired. **MUST NOT be the provider** — an address cannot hold both client and provider roles on the same job.
+- **Provider**: Set at creation or later via `setProvider`. Calls `setBudget(jobId, token, amount)` to propose a price and payment token. Calls `submit(jobId, deliverable)` when work is done to move the job from Funded to Submitted for evaluation. While Funded, may file a settlement claim via `submitClaim` and may withdraw their own pending claim via `rejectClaim`. May reject when status is Open (e.g. to decline the engagement before any escrow is locked). Receives payment on each settlement and the remainder when the job is Completed. Does not call `complete` or job-level `reject` once the job has been funded.
+- **Evaluator**: Single address per job, set at creation. When status is Submitted, **only** the evaluator MAY call `complete(jobId, reason?)` or `reject(jobId, reason?)`. When status is Funded, the evaluator MAY call `reject(jobId, reason?)` (before submission) and MAY approve or reject a pending provider claim — but MUST NOT be able to settle amounts the provider did not claim. MAY be the client (e.g. `evaluator = client`) so the client can complete or reject the job without a third party, or MAY be a **smart contract** that performs arbitrary checks (e.g. verifying a zero‑knowledge proof or aggregating off‑chain signals) before deciding whether to call `complete` or `reject` on the job. **MUST NOT be the provider** — an address cannot hold both roles on the same job.
 
 ### Job Data
 
@@ -70,6 +74,9 @@ Each job SHALL have at least:
 - `paymentToken` (address) — the [ERC-20](./eip-20.md) token used for payment on this job, set via `setBudget`.
 - `hook` (address) — OPTIONAL. External hook contract called before and after core functions (see Hooks below). MAY be `address(0)` (no hook).
 - `providerAgentId` (uint256) — OPTIONAL. When non-zero, references an agent identity in an [ERC-8004](./eip-8004.md) registry, enabling on-chain identity binding for reputation. Set via `setProvider` (or at creation if provider is known). Default `0` (unset).
+- `settledAmount` (uint256) — cumulative gross amount already released through claim settlements (see Claim Settlement below). Initially `0`. MUST be strictly monotonically increasing and MUST NOT exceed `budget`.
+
+All payout and refund computations in this specification are defined over the **unsettled remainder** `budget - settledAmount`. For jobs that never use claim settlement, `settledAmount` remains `0` and every formula reduces to the full budget.
 
 Each job has its own [ERC-20](./eip-20.md) payment token. The token address is set alongside the amount when `setBudget` is called. This allows different jobs on the same contract to use different tokens.
 
@@ -95,11 +102,38 @@ Called by client. SHALL revert if job is not Open, caller is not client, **provi
 - **submit(jobId, deliverable, optParams?)**
 Called by provider only. SHALL revert if caller is not the job's provider, or if `job.expiredAt > 0` and the job has expired. SHALL revert if job is not Funded, unless the job is Open with `budget == 0` (zero-budget job, no escrow needed). SHALL set status to Submitted and SHOULD record `submittedAt = block.timestamp` for grace-period accounting. `deliverable` (`bytes32`) is a reference to submitted work (e.g. hash of off-chain deliverable, IPFS CID, attestation commitment). SHALL emit an event including `deliverable` (e.g. JobSubmitted). `optParams` forwarded to hook if set.
 - **complete(jobId, reason, optParams?)**
-Called by evaluator only. SHALL revert if job is not Submitted or caller is not the job's evaluator. SHALL set status to Completed. SHALL transfer escrowed funds to provider, minus optional platform fee to a configurable treasury and optional evaluator fee paid to the evaluator address. `reason` MAY be `bytes32(0)` or an attestation hash (OPTIONAL). SHALL emit an event including `reason` if provided. `optParams` forwarded to hook if set.
+Called by evaluator only. SHALL revert if job is not Submitted or caller is not the job's evaluator. SHALL set status to Completed. SHALL transfer the unsettled remainder (`budget - settledAmount`) to provider, minus optional platform fee to a configurable treasury and optional evaluator fee paid to the evaluator address. `reason` MAY be `bytes32(0)` or an attestation hash (OPTIONAL). SHALL emit an event including `reason` if provided. `optParams` forwarded to hook if set.
 - **reject(jobId, reason, optParams?)**
-Called by **client or provider when job is Open**, or by **evaluator when job is Funded or Submitted**. SHALL revert if job is not Open, Funded, or Submitted, or if the caller is not authorised for the current status. SHALL set status to Rejected. If Funded or Submitted, SHALL refund escrow to client. `reason` OPTIONAL. SHALL emit an event including `reason` and the caller (rejector) if provided. `optParams` forwarded to hook if set.
+Called by **client or provider when job is Open**, or by **evaluator when job is Funded or Submitted**. SHALL revert if job is not Open, Funded, or Submitted, or if the caller is not authorised for the current status. SHALL set status to Rejected. If Funded or Submitted, SHALL refund the unsettled remainder (`budget - settledAmount`) to client. If a settlement claim is pending, SHALL clear it (see Claim interactions below). `reason` OPTIONAL. SHALL emit an event including `reason` and the caller (rejector) if provided. `optParams` forwarded to hook if set.
 - **claimRefund(jobId)**
-Callable by anyone when status is Open, Funded, or Submitted. SHALL revert if status is Open or Funded and `block.timestamp < job.expiredAt`. SHALL revert if status is Submitted and `block.timestamp < job.expiredAt + EVALUATION_GRACE_PERIOD` (the grace period protects an evaluator who is mid-review from being censored by a third-party refund call; implementations MAY set the grace period length or omit it). SHALL set status to Expired. If the prior status was Funded or Submitted and `budget > 0`, SHALL transfer the full escrow to the client. SHALL NOT be hookable.
+Callable by anyone when status is Open, Funded, or Submitted. SHALL revert if status is Open or Funded and `block.timestamp < job.expiredAt`. SHALL revert if status is Submitted and `block.timestamp < job.expiredAt + EVALUATION_GRACE_PERIOD` (the grace period protects an evaluator who is mid-review from being censored by a third-party refund call; implementations MAY set the grace period length or omit it). SHALL revert if a settlement claim is pending on a non-Submitted job (claims can only arise while Funded) — pending claims MUST be resolved (approved, rejected, or withdrawn) before an expiry refund. SHALL set status to Expired. If the prior status was Funded or Submitted, SHALL transfer the unsettled remainder (`budget - settledAmount`), if non-zero, to the client. SHALL NOT be hookable.
+
+### Claim Settlement
+
+While a job is Funded, escrow MAY be released incrementally through **claim settlement**, ahead of (or instead of) terminal completion. Two settlement paths share one ledger:
+
+- the **direct path**: the client unilaterally settles an amount to the provider (`settleClaim`);
+- the **claim path**: the provider files a pending claim (`submitClaim`) which the client or evaluator approves (`approveClaim`) or any of the three parties rejects (`rejectClaim`).
+
+All settlement functions take a **cumulative amount** — the total gross amount the caller asserts should have been released to date — never a delta. Each settlement SHALL release exactly `cumulativeAmount - settledAmount`, then set `settledAmount = cumulativeAmount`. A settlement SHALL revert if `cumulativeAmount <= settledAmount` (no new settlement) or `cumulativeAmount > budget` (exceeds escrow). Because both paths write the same strictly-increasing `settledAmount`, no interleaving of direct settlements, claim approvals, completion, rejection, and refund can release more than `budget` in total, and the delta paid by a claim approval can only shrink between submission and approval, never grow.
+
+At most one claim is pending per job. Implementations SHALL bind the pending claim by a hash over `(cumulativeAmount, deliverable, optParams)` so that approval and rejection require presenting the exact claim contents.
+
+- **submitClaim(jobId, cumulativeAmount, deliverable, optParams?)**
+Called by **provider** only. Files a pending claim against a Funded job; moves no funds. SHALL revert if the job is not Funded, has expired, `deliverable == bytes32(0)`, a claim is already pending, `cumulativeAmount <= settledAmount`, `cumulativeAmount > budget`, or an identical claim tuple `(cumulativeAmount, deliverable, optParams)` was previously filed on this job (replay protection; implementations SHOULD track consumed claim hashes). SHALL emit ClaimSubmitted. `optParams` forwarded to hook if set.
+- **settleClaim(jobId, cumulativeAmount, deliverable, optParams?)**
+Called by **client** only. Immediate unilateral settlement: SHALL revert if the job is not Funded, has expired, `cumulativeAmount <= settledAmount`, or `cumulativeAmount > budget`. SHALL set `settledAmount = cumulativeAmount` and distribute the delta to the provider (minus optional platform/evaluator fees). `deliverable` is the client's settlement attestation, not a verified provider claim. A pending claim SHALL NOT block this function (streaming settlement); settling reduces the delta any subsequent approval of that claim would pay. SHALL emit Settled and ClaimSettled. `optParams` forwarded to hook if set.
+- **approveClaim(jobId, cumulativeAmount, deliverable, optParams?)**
+Called by **client or evaluator**. SHALL revert if the job is not Funded, no claim is pending, or the arguments do not exactly match the pending claim — the evaluator MUST NOT be able to release amounts the provider did not claim. SHALL revert if `cumulativeAmount <= settledAmount` (e.g. the claim was already covered by direct settlement) or `cumulativeAmount > budget`. SHALL consume the pending claim, set `settledAmount = cumulativeAmount`, and distribute the delta (minus optional fees). Approval is NOT subject to an expiry check: a claim filed before expiry remains approvable, consistent with the evaluation grace period philosophy. SHALL emit Settled and ClaimApproved. `optParams` forwarded to hook if set.
+- **rejectClaim(jobId, cumulativeAmount, deliverable, reason, optParams?)**
+Called by **client, evaluator, or provider** (the provider withdrawing their own stale claim, e.g. to file a corrected one). SHALL revert if the job is not Funded, no claim is pending, or the arguments do not exactly match the pending claim. SHALL consume the pending claim without moving funds. The consumed claim tuple SHALL remain unfilable — a corrected claim must differ in `deliverable` or `optParams`. SHALL emit ClaimRejected. `optParams` forwarded to hook if set.
+
+#### Claim interactions
+
+- **submit** SHALL supersede any pending claim — the provider is electing the full-completion path for the entire remainder — and SHOULD emit ClaimRejected with a supersession reason so hooks and indexers observe a closed claim lifecycle.
+- Job-level **reject** SHALL also clear any pending claim (emitting ClaimRejected) before transitioning the job to Rejected.
+- **claimRefund** SHALL revert while a claim is pending (claims can only arise while Funded); the claim must be approved, rejected, or withdrawn first. For non-hooked jobs the client can always unblock a refund in two transactions (`rejectClaim`, then `claimRefund`); for hooked jobs, a reverting `rejectClaim` hook can block this path (see Hook security).
+- Implementations SHALL update `settledAmount` and clear the pending claim **before** any token transfers (checks-effects-interactions).
 
 ### Attestation
 
@@ -108,7 +142,7 @@ Callable by anyone when status is Open, Funded, or Submitted. SHALL revert if st
 
 ### Fees
 
-Implementations MAY charge a **platform fee** and/or an **evaluator fee** (both in basis points) on Completed. The platform fee is paid to a configurable treasury; the evaluator fee is paid to the job's evaluator address. The specification does not require either fee. If present, fees SHALL be deducted only on completion (not on refund).
+Implementations MAY charge a **platform fee** and/or an **evaluator fee** (both in basis points). The platform fee is paid to a configurable treasury; the evaluator fee is paid to the job's evaluator address. The specification does not require either fee. If present, fees SHALL be computed independently on each settlement delta and on the completion remainder. Note that with integer (floor) division, the aggregate fee across many small settlements MAY be marginally lower than a single fee computed over the total released amount; implementations and integrators SHOULD treat fee totals as rounding-dependent. Fees SHALL NOT be taken on refunds.
 
 ### Hooks (OPTIONAL)
 
@@ -146,6 +180,10 @@ When a job has a hook set, the core contract SHALL call `hook.beforeAction(...)`
 | `submit`       | Yes      |
 | `complete`     | Yes      |
 | `reject`       | Yes      |
+| `submitClaim`  | Yes      |
+| `settleClaim`  | Yes      |
+| `approveClaim` | Yes      |
+| `rejectClaim`  | Yes      |
 | `claimRefund`  | **No** — permissionless safety mechanism, SHALL NOT be hookable |
 
 #### Data encoding
@@ -159,10 +197,16 @@ The `data` parameter passed to hooks contains the core function's parameters enc
 | `submit`       | `abi.encode(address caller, bytes32 deliverable, bytes optParams)` |
 | `complete`     | `abi.encode(address caller, bytes32 reason, bytes optParams)` |
 | `reject`       | `abi.encode(address caller, bytes32 reason, bytes optParams)` |
+| `submitClaim`  | `abi.encode(address caller, uint256 cumulativeAmount, bytes32 deliverable, bytes optParams)` |
+| `settleClaim`  | `abi.encode(address caller, uint256 cumulativeAmount, bytes32 deliverable, bytes optParams)` |
+| `approveClaim` | `abi.encode(address caller, uint256 cumulativeAmount, bytes32 deliverable, bytes optParams)` |
+| `rejectClaim`  | `abi.encode(address caller, uint256 cumulativeAmount, bytes32 deliverable, bytes32 reason, bytes optParams)` |
+
+When `submit` or `reject` supersedes a pending claim, no claim-specific hook callback fires for the supersession itself; hooks observe the post-supersession claim state in the `submit`/`reject` callbacks.
 
 #### Hook behaviour
 
-- The `optParams` field (`bytes`, OPTIONAL) on each hookable core function is an opaque payload forwarded to the hook via the `data` parameter. Callers that do not use hooks MAY pass empty bytes. The core contract SHALL NOT interpret `optParams`; it is for the hook only.
+- The `optParams` field (`bytes`, OPTIONAL) on each hookable core function is an opaque payload forwarded to the hook via the `data` parameter. Callers that do not use hooks MAY pass empty bytes. The core contract SHALL NOT decode `optParams`; however, the claim-settlement functions hash-bind `optParams` into the claim identity, so approving or rejecting a claim requires presenting the identical `optParams` bytes.
 - **Before hooks** (`beforeAction`) are called before the core logic executes. A before hook MAY revert to block the action (e.g. enforce custom validation, allowlists, or preconditions).
 - **After hooks** (`afterAction`) are called after the core logic completes (including state changes and token transfers). An after hook MAY perform side effects (e.g. emit events, update external state, trigger notifications) or revert to roll back the entire transaction.
 - If `job.hook == address(0)`, the core contract SHALL skip hook calls and execute normally.
@@ -202,7 +246,7 @@ Step 1 — createJob
   Job created (Open), hook address stored.
 
 Step 2 — setBudget
-  Client → setBudget(jobId, USDC, serviceFee, optParams=abi.encode(buyer, transferAmount))
+  Provider → setBudget(jobId, USDC, serviceFee, optParams=abi.encode(buyer, transferAmount))
     → hook.beforeAction: decode optParams, store {buyer, transferAmount} as commitment.
     → core: job.paymentToken = USDC, job.budget = serviceFee
 
@@ -243,6 +287,8 @@ Recovery:
 **Solution:** A `BiddingHook` that verifies off-chain signed bids. Providers sign bid commitments off-chain; the client collects bids, selects the winner, and submits the winning bid's signature via `setProvider`. The hook's `beforeAction` callback recovers the signer and verifies it matches the chosen provider — proving the provider actually committed to that price.
 
 Zero direct calls to the hook. All interactions flow through the core contract → hook callbacks.
+
+> Note: this example assumes an implementation that permits the client to call `setBudget` while the provider is unset (to open bidding). The reference implementation restricts `setBudget` to the job's provider, so a bidding deployment would relax that restriction or coordinate the bidding window off-chain.
 
 ```
 Step 1 — createJob
@@ -289,10 +335,17 @@ Implementations SHOULD emit at least:
 - **JobCompleted**(jobId, evaluator, reason)
 - **JobRejected**(jobId, rejector, reason)
 - **JobExpired**(jobId)
-- **PaymentReleased**(jobId, provider, amount) — net amount paid to the provider on completion
+- **PaymentReleased**(jobId, provider, amount) — net amount paid to the provider on completion or on each settlement
 - **PlatformFeePaid**(jobId, platformTreasury, amount) — only emitted when a non-zero platform fee is taken
 - **EvaluatorFeePaid**(jobId, evaluator, amount) — only emitted when a non-zero evaluator fee is taken
 - **Refunded**(jobId, client, amount)
+- **Settled**(jobId, cumulativeAmount, delta) — emitted on every settlement regardless of path
+- **ClaimSubmitted**(jobId, provider, cumulativeAmount, delta, deliverable) — provider files a pending claim
+- **ClaimSettled**(jobId, settler, cumulativeAmount, delta, deliverable) — direct client settlement; `deliverable` is the settler's attestation, not a verified provider claim
+- **ClaimApproved**(jobId, approver, cumulativeAmount, delta, deliverable) — pending claim approved by client or evaluator
+- **ClaimRejected**(jobId, rejector, reason) — pending claim rejected, withdrawn, or superseded
+
+Note that `PaymentReleased`, `PlatformFeePaid`, and `EvaluatorFeePaid` fire on each settlement, not only on completion.
 
 Implementations that add admin tooling SHOULD also emit operational events (e.g. `HookWhitelistUpdated`, `PaymentTokenAllowlistUpdated`, `HookDetached`, `PlatformFeeUpdated`, `EvaluatorFeeUpdated`, `EmergencyWithdraw`) so off-chain indexers can track configuration changes.
 
@@ -303,6 +356,9 @@ Implementations that add admin tooling SHOULD also emit operational events (e.g.
 - **Minimal surface**: Attestation is the optional `reason` on complete/reject; no additional ledger is required.
 - **Four states**: Open, Funded, Submitted, and Terminal (Completed, Rejected, or Expired) are enough for "fund → work → submit → evaluate or refund".
 - **Expiry**: Refund after `expiredAt` gives client a way to reclaim funds without an explicit reject.
+- **Cumulative amounts, not deltas**: Settlement functions take the cumulative total released to date, making them idempotent under replay and benign under races — a re-submitted or stale settlement reverts (no new settlement) instead of double-paying.
+- **Two settlement paths, one ledger**: Unilateral client settlement (`settleClaim`) and attested claim approval (`approveClaim`) carry different authorization semantics — who may call, expiry behaviour, and what is being consented to — and deliberately remain separate functions with distinct selectors, keeping caller intent explicit on-chain and immune to front-running between paths. They share one monotone `settledAmount`, which is the cross-path double-payment defense.
+- **Single pending claim, hash-bound**: Storing only a hash of the pending claim keeps storage minimal and forces approvers to present (and, in the Signed Authorizations extension, sign over) the full claim contents they are approving.
 - **Hooks over inheritance**: Optional hook contracts let integrators extend the protocol (validation, reputation, fees) without modifying or inheriting from the core contract. The core stays minimal; complexity lives in the hook.
 - **Generic hook interface**: The `IERC8183Hook` interface uses just two functions (`beforeAction`/`afterAction`) with a selector parameter rather than named functions per action. This keeps the interface stable as the core protocol evolves — new hookable functions simply produce new selector values without changing the interface.
 
@@ -349,41 +405,27 @@ The following patterns are RECOMMENDED:
 
 ---
 
-#### Meta-Transactions / Facilitator Relay ([ERC-2771](./eip-2771.md))
+#### Signed Authorizations ([EIP-712](./eip-712.md))
 
-To support gasless execution — where a client, provider, or evaluator signs an intent off-chain and a **facilitator** submits the transaction on their behalf — implementations SHOULD support [ERC-2771](./eip-2771.md) (Secure Protocol for Native Meta Transactions).
+To support gasless execution — where a client, provider, or evaluator signs an intent off-chain and a **facilitator** submits the transaction on their behalf — implementations SHOULD support signed authorizations: per-call [EIP-712](./eip-712.md) inner signatures in the style of [ERC-3009](./eip-3009.md). Unlike an [ERC-2771](./eip-2771.md) trusted-forwarder relay (which implementations MAY support instead), an inner signature binds the exact call parameters and requires no privileged forwarder contract in the trust base.
 
 **How it works:**
 
-1. A participant (client, provider, or evaluator) signs a meta-transaction off-chain (e.g. `createJob`, `fund`, `submit`).
-2. A facilitator submits the signed payload to a **trusted forwarder** contract.
-3. The forwarder verifies the signature and calls the ERC-8183 contract, appending the original signer's address.
-4. The ERC-8183 contract uses `_msgSender()` (from `ERC2771Context`) instead of `msg.sender` to identify the caller.
+1. A participant signs an EIP-712 authorization off-chain for a specific action (e.g. `fund`, `submit`, `approveClaim`), binding all of that action's parameters plus a nonce and deadline.
+2. Any facilitator submits the signed payload to the corresponding `*WithAuthorization` entry point.
+3. The contract verifies the signature and executes the core function with the **signer** as the acting party.
 
 **Implementation requirements:**
 
-- The ERC-8183 contract SHALL inherit `ERC2771Context` (or equivalent) and use `_msgSender()` for all authorization checks (`client`, `provider`, `evaluator`).
-- All role checks (e.g. "caller is client", "caller is provider") SHALL use `_msgSender()` rather than `msg.sender`.
-- The trusted forwarder address SHALL be set at deployment and SHOULD be immutable.
+- Each actor-authorized core function (including the claim-settlement functions, but excluding the permissionless `claimRefund`) SHALL have a `*WithAuthorization` variant accepting the original parameters plus an `Authorization { address signer; uint72 nonce; uint256 deadline; bytes sig; }`. The reference implementation wraps `createJob`'s parameters in a `CreateJobAuthorizationParams` struct to stay within stack limits.
+- Each action SHALL have a distinct EIP-712 typehash binding `signer`, all call parameters (dynamic values such as `description` and `optParams` bound by their `keccak256` hash), `nonce`, and `deadline`, so a signature for one action can never execute another.
+- Nonces SHALL be unordered (random-nonce style, as in ERC-3009) and single-use across all action types. The reference implementation packs them as `bytes32((uint160(signer) << 96) | nonce)` in a single used-nonce mapping.
+- The nonce SHALL be marked used before external signature verification, and verification SHALL support [ERC-1271](./eip-1271.md) contract signers in addition to EOAs.
+- Authorizations SHALL expire after `deadline`.
+- **cancelAuthorization(nonce)**: the signer (and only the signer — cancellation is deliberately not relayable) SHALL be able to burn an unused nonce so an outstanding signature can never be executed. Cancellation SHALL remain callable while the contract is paused, so signers can revoke outstanding authorizations during incidents. SHALL revert if the nonce was already used or cancelled.
+- The contract SHALL emit an event on use and on cancellation — the reference implementation emits `AuthorizationUsed(address indexed signer, bytes32 indexed nonce)` with the packed nonce — and SHOULD expose `DOMAIN_SEPARATOR()`. The reference implementation uses the EIP-712 domain `{ name: "ERC8183", version: "1" }`.
 
-```solidity
-import {ERC2771Context} from "@openzeppelin/contracts/metatx/ERC2771Context.sol";
-
-contract ERC8183 is ERC2771Context, ... {
-    constructor(address trustedForwarder, ...)
-        ERC2771Context(trustedForwarder) { ... }
-
-    // Example: fund() using _msgSender() instead of msg.sender
-    function fund(uint256 jobId, uint256 expectedBudget) external {
-        Job storage job = jobs[jobId];
-        if (_msgSender() != job.client) revert Unauthorized();
-        if (job.budget != expectedBudget) revert BudgetMismatch();
-        // ...
-    }
-}
-```
-
-**Token approvals:** For functions that pull tokens (e.g. `fund`), the signer SHOULD use [ERC-2612](./eip-2612.md) (`permit`) to approve token spending via signature. The facilitator can then call `permit` and `fund` in a single transaction — no on-chain approval tx needed from the signer.
+**Token approvals:** For functions that pull tokens (e.g. `fundWithAuthorization`), the signer SHOULD use [ERC-2612](./eip-2612.md) (`permit`) to approve token spending via signature. The facilitator can then call `permit` and `fundWithAuthorization` in a single transaction — no on-chain approval tx needed from the signer.
 
 **x402 compatibility:** This extension enables compatibility with HTTP-native payment protocols such as x402, where an AI agent signs payment intents off-chain and a payment facilitator handles on-chain execution. The agent only needs a private key and tokens — no gas, no RPC management, no chain-specific logic.
 
@@ -391,7 +433,7 @@ contract ERC8183 is ERC2771Context, ... {
 
 ## Backwards Compatibility
 
-No backward compatibility issues found.
+No backward compatibility issues found. Claim settlement is additive over earlier drafts: a job whose claim-settlement functions are never called has `settledAmount = 0`, so every payout and refund formula reduces to the original full-budget behaviour. The Signed Authorizations extension adds entry points only and does not change job semantics. Implementations retrofitting signed authorizations onto a live proxy MUST note that (re)initializing the EIP-712 domain invalidates any authorization signed under a previous domain; this is intentional signature revocation.
 
 ## Reference Implementation
 
@@ -410,401 +452,55 @@ interface IERC8183Hook is IERC165 {
 }
 ```
 
-### ERC8183.sol
+### ERC8183.sol and ERC8183WithAuthorization.sol
+
+The full reference implementation lives alongside this document in the repository: `contracts/ERC8183.sol` (core job escrow with claim settlement and hooks) and `contracts/ERC8183WithAuthorization.sol` (the Signed Authorizations extension). The earlier inline listing is replaced by the external interface below; consult the source for the authoritative implementation.
 
 ```solidity
-pragma solidity ^0.8.28;
+interface IERC8183 {
+    // ── Job lifecycle ──
+    function createJob(address provider, address evaluator, uint48 expiredAt, string calldata description, address hook, uint256 providerAgentId) external returns (uint256 jobId);
+    function setProvider(uint256 jobId, address provider, uint256 agentId) external;
+    function setBudget(uint256 jobId, address token, uint256 amount, bytes calldata optParams) external;
+    function fund(uint256 jobId, uint256 expectedBudget, bytes calldata optParams) external;
+    function submit(uint256 jobId, bytes32 deliverable, bytes calldata optParams) external;
+    function complete(uint256 jobId, bytes32 reason, bytes calldata optParams) external;
+    function reject(uint256 jobId, bytes32 reason, bytes calldata optParams) external;
+    function claimRefund(uint256 jobId) external;
 
-import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
-import "./IERC8183Hook.sol";
-import "@openzeppelin/contracts/utils/introspection/ERC165Checker.sol";
-
-contract ERC8183 is
-    Initializable,
-    AccessControlUpgradeable,
-    PausableUpgradeable,
-    ReentrancyGuardTransient,
-    UUPSUpgradeable
-{
-    using SafeERC20 for IERC20;
-
-    enum JobStatus { Open, Funded, Submitted, Completed, Rejected, Expired }
-
-    struct Job {
-        address client;
-        JobStatus status;
-        address provider;
-        uint48 expiredAt;
-        address evaluator;
-        uint48 submittedAt;
-        uint256 budget;
-        address hook;
-        address paymentToken;
-        uint256 providerAgentId;
-        string description;
-    }
-
-    bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
-    uint256 public constant EVALUATION_GRACE_PERIOD = 1 hours;
-
-    uint256 public platformFeeBP;       // 10000 = 100%
-    address public platformTreasury;
-    uint256 public evaluatorFeeBP;
-
-    mapping(uint256 => Job) public jobs;
-    uint256 public jobCounter;
-    mapping(address => bool) public whitelistedHooks;
-    mapping(address => bool) public allowedPaymentTokens;
-
-    event JobCreated(uint256 indexed jobId, address indexed client, address indexed provider, address evaluator, uint48 expiredAt, address hook);
-    event ProviderSet(uint256 indexed jobId, address indexed provider, uint256 agentId);
-    event BudgetSet(uint256 indexed jobId, address indexed token, uint256 amount);
-    event JobFunded(uint256 indexed jobId, address indexed client, uint256 amount);
-    event JobSubmitted(uint256 indexed jobId, address indexed provider, bytes32 deliverable);
-    event JobCompleted(uint256 indexed jobId, address indexed evaluator, bytes32 reason);
-    event JobRejected(uint256 indexed jobId, address indexed rejector, bytes32 reason);
-    event JobExpired(uint256 indexed jobId);
-    event PaymentReleased(uint256 indexed jobId, address indexed provider, uint256 amount);
-    event PlatformFeePaid(uint256 indexed jobId, address indexed platformTreasury, uint256 amount);
-    event EvaluatorFeePaid(uint256 indexed jobId, address indexed evaluator, uint256 amount);
-    event Refunded(uint256 indexed jobId, address indexed client, uint256 amount);
-    event HookWhitelistUpdated(address indexed hook, bool status);
-    event PaymentTokenAllowlistUpdated(address indexed token, bool status);
-    event HookDetached(uint256 indexed jobId, address indexed hook);
-    event PlatformFeeUpdated(uint256 feeBP, address indexed treasury);
-    event EvaluatorFeeUpdated(uint256 feeBP);
-    event EmergencyWithdraw(address indexed token, address indexed to, uint256 amount);
-
-    error InvalidJob();
-    error InvalidHook();
-    error WrongStatus();
-    error Unauthorized();
-    error ZeroAddress();
-    error ExpiryTooShort();
-    error ProviderNotSet();
-    error FeesTooHigh();
-    error HookNotWhitelisted();
-    error BudgetMismatch();
-    error ProviderCannotBeEvaluator();
-    error ClientCannotBeProvider();
-    error GracePeriodActive();
-    error PaymentTokenNotAllowed();
-    error UnexpectedFundedAmount();
-
-    /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() { _disableInitializers(); }
-
-    function initialize(address treasury_, address admin_) public initializer {
-        if (treasury_ == address(0) || admin_ == address(0)) revert ZeroAddress();
-        __AccessControl_init();
-        __Pausable_init();
-        platformTreasury = treasury_;
-        _grantRole(DEFAULT_ADMIN_ROLE, admin_);
-        _grantRole(ADMIN_ROLE, admin_);
-        whitelistedHooks[address(0)] = true;
-    }
-
-    function _authorizeUpgrade(address newImplementation) internal override onlyRole(DEFAULT_ADMIN_ROLE) {}
-
-    // ──────────────────── Admin ────────────────────
-
-    function pause() external onlyRole(ADMIN_ROLE) { _pause(); }
-    function unpause() external onlyRole(ADMIN_ROLE) { _unpause(); }
-
-    function emergencyWithdraw(address token, address to, uint256 amount) external onlyRole(ADMIN_ROLE) whenPaused {
-        if (to == address(0)) revert ZeroAddress();
-        if (token == address(0)) {
-            (bool success,) = payable(to).call{value: amount}("");
-            require(success, "Transfer failed");
-        } else {
-            IERC20(token).safeTransfer(to, amount);
-        }
-        emit EmergencyWithdraw(token, to, amount);
-    }
-
-    function setPlatformFee(uint256 feeBP_, address treasury_) external onlyRole(ADMIN_ROLE) {
-        if (treasury_ == address(0)) revert ZeroAddress();
-        if (feeBP_ + evaluatorFeeBP > 10000) revert FeesTooHigh();
-        platformFeeBP = feeBP_;
-        platformTreasury = treasury_;
-        emit PlatformFeeUpdated(feeBP_, treasury_);
-    }
-
-    function setEvaluatorFee(uint256 feeBP_) external onlyRole(ADMIN_ROLE) {
-        if (feeBP_ + platformFeeBP > 10000) revert FeesTooHigh();
-        evaluatorFeeBP = feeBP_;
-        emit EvaluatorFeeUpdated(feeBP_);
-    }
-
-    function setHookWhitelist(address hook, bool status) external onlyRole(ADMIN_ROLE) {
-        if (hook == address(0)) revert ZeroAddress();
-        whitelistedHooks[hook] = status;
-        emit HookWhitelistUpdated(hook, status);
-    }
-
-    function setPaymentTokenAllowed(address token, bool status) external onlyRole(ADMIN_ROLE) {
-        if (token == address(0)) revert ZeroAddress();
-        allowedPaymentTokens[token] = status;
-        emit PaymentTokenAllowlistUpdated(token, status);
-    }
-
-    function batchDetachHook(uint256[] calldata jobIds) external onlyRole(ADMIN_ROLE) {
-        for (uint256 i = 0; i < jobIds.length; i++) {
-            uint256 jobId = jobIds[i];
-            if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
-            Job storage job = jobs[jobId];
-            address oldHook = job.hook;
-            if (oldHook == address(0)) continue;
-            job.hook = address(0);
-            emit HookDetached(jobId, oldHook);
-        }
-    }
-
-    // ──────────────────── Hook Helpers ────────────────────
-
-    function _beforeHook(address hook, uint256 jobId, bytes4 selector, bytes memory data) internal {
-        if (hook != address(0)) IERC8183Hook(hook).beforeAction(jobId, selector, data);
-    }
-
-    function _afterHook(address hook, uint256 jobId, bytes4 selector, bytes memory data) internal {
-        if (hook != address(0)) IERC8183Hook(hook).afterAction(jobId, selector, data);
-    }
-
-    // ──────────────────── Job Lifecycle ────────────────────
-
-    function createJob(
-        address provider,
-        address evaluator,
-        uint48 expiredAt,
-        string calldata description,
-        address hook,
-        uint256 providerAgentId
-    ) external whenNotPaused nonReentrant returns (uint256) {
-        if (expiredAt <= block.timestamp + 5 minutes) revert ExpiryTooShort();
-        if (msg.sender == provider) revert ClientCannotBeProvider();
-        if (evaluator == address(0)) revert ZeroAddress();
-        if (evaluator == provider) revert ProviderCannotBeEvaluator();
-        if (!whitelistedHooks[hook]) revert HookNotWhitelisted();
-        if (hook != address(0)) {
-            if (!ERC165Checker.supportsInterface(hook, type(IERC8183Hook).interfaceId)) revert InvalidHook();
-        }
-
-        uint256 jobId = ++jobCounter;
-        jobs[jobId] = Job({
-            client: msg.sender,
-            status: JobStatus.Open,
-            provider: provider,
-            expiredAt: expiredAt,
-            evaluator: evaluator,
-            submittedAt: 0,
-            budget: 0,
-            hook: hook,
-            paymentToken: address(0),
-            providerAgentId: provider != address(0) ? providerAgentId : 0,
-            description: description
-        });
-
-        emit JobCreated(jobId, msg.sender, provider, evaluator, expiredAt, hook);
-        return jobId;
-    }
-
-    function setProvider(uint256 jobId, address provider_, uint256 agentId) external whenNotPaused {
-        Job storage job = jobs[jobId];
-        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
-        if (job.status != JobStatus.Open) revert WrongStatus();
-        if (block.timestamp >= job.expiredAt) revert WrongStatus();
-        if (msg.sender != job.client) revert Unauthorized();
-        if (job.provider != address(0)) revert WrongStatus();
-        if (provider_ == address(0)) revert ZeroAddress();
-        if (provider_ == job.evaluator) revert ProviderCannotBeEvaluator();
-        job.provider = provider_;
-        job.providerAgentId = agentId;
-        emit ProviderSet(jobId, provider_, agentId);
-    }
-
-    function setBudget(uint256 jobId, address token, uint256 amount, bytes calldata optParams)
-        external whenNotPaused nonReentrant
-    {
-        Job storage job = jobs[jobId];
-        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
-        if (job.status != JobStatus.Open) revert WrongStatus();
-        if (block.timestamp >= job.expiredAt) revert WrongStatus();
-        if (msg.sender != job.provider) revert Unauthorized();
-        if (token == address(0)) revert ZeroAddress();
-        if (!allowedPaymentTokens[token]) revert PaymentTokenNotAllowed();
-
-        bytes memory data = abi.encode(msg.sender, token, amount, optParams);
-        _beforeHook(job.hook, jobId, msg.sig, data);
-
-        job.paymentToken = token;
-        job.budget = amount;
-        emit BudgetSet(jobId, token, amount);
-
-        _afterHook(job.hook, jobId, msg.sig, data);
-    }
-
-    function fund(uint256 jobId, uint256 expectedBudget, bytes calldata optParams)
-        external whenNotPaused nonReentrant
-    {
-        Job storage job = jobs[jobId];
-        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
-        if (job.status != JobStatus.Open) revert WrongStatus();
-        if (msg.sender != job.client) revert Unauthorized();
-        if (job.provider == address(0)) revert ProviderNotSet();
-        if (block.timestamp >= job.expiredAt) revert WrongStatus();
-        if (job.budget != expectedBudget) revert BudgetMismatch();
-
-        bytes memory data = abi.encode(msg.sender, optParams);
-        _beforeHook(job.hook, jobId, msg.sig, data);
-
-        job.status = JobStatus.Funded;
-        if (job.budget > 0) {
-            IERC20 token = IERC20(job.paymentToken);
-            uint256 balanceBefore = token.balanceOf(address(this));
-            token.safeTransferFrom(job.client, address(this), job.budget);
-            uint256 received = token.balanceOf(address(this)) - balanceBefore;
-            if (received != job.budget) revert UnexpectedFundedAmount();
-        }
-        emit JobFunded(jobId, job.client, job.budget);
-
-        _afterHook(job.hook, jobId, msg.sig, data);
-    }
-
-    function submit(uint256 jobId, bytes32 deliverable, bytes calldata optParams)
-        external whenNotPaused nonReentrant
-    {
-        Job storage job = jobs[jobId];
-        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
-        if (
-            job.status != JobStatus.Funded &&
-            (job.status != JobStatus.Open || job.budget > 0)
-        ) revert WrongStatus();
-        if (job.expiredAt != 0 && block.timestamp >= job.expiredAt) revert WrongStatus();
-        if (msg.sender != job.provider) revert Unauthorized();
-
-        bytes memory data = abi.encode(msg.sender, deliverable, optParams);
-        _beforeHook(job.hook, jobId, msg.sig, data);
-
-        job.status = JobStatus.Submitted;
-        job.submittedAt = uint48(block.timestamp);
-        emit JobSubmitted(jobId, job.provider, deliverable);
-
-        _afterHook(job.hook, jobId, msg.sig, data);
-    }
-
-    function complete(uint256 jobId, bytes32 reason, bytes calldata optParams)
-        external whenNotPaused nonReentrant
-    {
-        Job storage job = jobs[jobId];
-        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
-        if (job.status != JobStatus.Submitted) revert WrongStatus();
-        if (msg.sender != job.evaluator) revert Unauthorized();
-
-        bytes memory data = abi.encode(msg.sender, reason, optParams);
-        _beforeHook(job.hook, jobId, msg.sig, data);
-
-        job.status = JobStatus.Completed;
-
-        uint256 amount = job.budget;
-        uint256 platformFee = (amount * platformFeeBP) / 10000;
-        uint256 evalFee = (amount * evaluatorFeeBP) / 10000;
-        uint256 net = amount - platformFee - evalFee;
-
-        IERC20 token = IERC20(job.paymentToken);
-        if (platformFee > 0) {
-            token.safeTransfer(platformTreasury, platformFee);
-            emit PlatformFeePaid(jobId, platformTreasury, platformFee);
-        }
-        if (evalFee > 0) {
-            token.safeTransfer(job.evaluator, evalFee);
-            emit EvaluatorFeePaid(jobId, job.evaluator, evalFee);
-        }
-        if (net > 0) {
-            token.safeTransfer(job.provider, net);
-            emit PaymentReleased(jobId, job.provider, net);
-        }
-
-        emit JobCompleted(jobId, job.evaluator, reason);
-
-        _afterHook(job.hook, jobId, msg.sig, data);
-    }
-
-    function reject(uint256 jobId, bytes32 reason, bytes calldata optParams)
-        external whenNotPaused nonReentrant
-    {
-        Job storage job = jobs[jobId];
-        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
-
-        if (job.status == JobStatus.Open) {
-            if (msg.sender != job.client && msg.sender != job.provider) revert Unauthorized();
-        } else if (job.status == JobStatus.Funded || job.status == JobStatus.Submitted) {
-            if (msg.sender != job.evaluator) revert Unauthorized();
-        } else {
-            revert WrongStatus();
-        }
-
-        bytes memory data = abi.encode(msg.sender, reason, optParams);
-        _beforeHook(job.hook, jobId, msg.sig, data);
-
-        JobStatus prev = job.status;
-        job.status = JobStatus.Rejected;
-
-        if ((prev == JobStatus.Funded || prev == JobStatus.Submitted) && job.budget > 0) {
-            IERC20(job.paymentToken).safeTransfer(job.client, job.budget);
-            emit Refunded(jobId, job.client, job.budget);
-        }
-
-        emit JobRejected(jobId, msg.sender, reason);
-
-        _afterHook(job.hook, jobId, msg.sig, data);
-    }
-
-    function claimRefund(uint256 jobId) external whenNotPaused nonReentrant {
-        Job storage job = jobs[jobId];
-        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
-        if (
-            job.status != JobStatus.Open &&
-            job.status != JobStatus.Funded &&
-            job.status != JobStatus.Submitted
-        ) revert WrongStatus();
-        if (job.status == JobStatus.Submitted) {
-            if (block.timestamp < job.expiredAt + EVALUATION_GRACE_PERIOD) revert GracePeriodActive();
-        } else {
-            if (block.timestamp < job.expiredAt) revert WrongStatus();
-        }
-
-        JobStatus prev = job.status;
-        job.status = JobStatus.Expired;
-
-        if (job.budget > 0 && (prev == JobStatus.Funded || prev == JobStatus.Submitted)) {
-            IERC20(job.paymentToken).safeTransfer(job.client, job.budget);
-            emit Refunded(jobId, job.client, job.budget);
-        }
-
-        emit JobExpired(jobId);
-    }
-
-    // ──────────────────── View ────────────────────
-
-    function getJob(uint256 jobId) external view returns (Job memory) {
-        return jobs[jobId];
-    }
+    // ── Claim settlement ──
+    function submitClaim(uint256 jobId, uint256 cumulativeAmount, bytes32 deliverable, bytes calldata optParams) external;
+    function settleClaim(uint256 jobId, uint256 cumulativeAmount, bytes32 deliverable, bytes calldata optParams) external;
+    function approveClaim(uint256 jobId, uint256 cumulativeAmount, bytes32 deliverable, bytes calldata optParams) external;
+    function rejectClaim(uint256 jobId, uint256 cumulativeAmount, bytes32 deliverable, bytes32 reason, bytes calldata optParams) external;
 }
+```
+
+The Signed Authorizations extension adds, for each actor-authorized function above (all except the permissionless `claimRefund`), a `*WithAuthorization` variant taking the same parameters plus the `Authorization` struct below (`createJobWithAuthorization` wraps the job parameters in a `CreateJobAuthorizationParams` struct):
+
+```solidity
+struct Authorization {
+    address signer;
+    uint72 nonce;
+    uint256 deadline;
+    bytes sig;
+}
+
+function cancelAuthorization(uint72 nonce) external;
+function DOMAIN_SEPARATOR() external view returns (bytes32);
 ```
 
 ## Security Considerations
 
 - Evaluator is trusted for completion and rejection once the job is Submitted; a malicious evaluator can complete or reject arbitrarily. Use reputation (e.g. [ERC-8004](./eip-8004.md)) or staking for high-value jobs.
 - Once Funded, only the evaluator can reject, and only the provider can submit; the client cannot unilaterally withdraw, which protects the provider after they start work.
+- **Evaluator settlement scope:** the evaluator can approve only the exact pending claim the provider filed, never originate or alter amounts; the client can settle freely but only toward the job's provider out of their own escrow. Widening either authority breaks the trust model — in particular, allowing the evaluator to settle arbitrary amounts would escalate the evaluator from attestor to spender of client escrow.
+- **Pending-claim refund blocking is bounded griefing:** a provider's pending claim blocks `claimRefund` on a Funded job past expiry, but on non-hooked jobs the client can always clear it with `rejectClaim` and refund in the next transaction. On hooked jobs a reverting `rejectClaim` hook can keep the claim pinned; clients accepting a hook accept this as part of the job's policy.
+- **Consumed claim hashes:** rejected or withdrawn claim tuples remain consumed, so a rejected claim cannot be silently refiled and later approved; a refile must visibly differ in `deliverable` or `optParams`.
+- **Authorization liveness:** a signed authorization is live until its deadline, use, or cancellation. `cancelAuthorization` remaining callable while paused is a deliberate incident-response property — pausing the contract must not trap signers with outstanding signatures.
 - No dispute resolution or arbitration; reject/expire is final.
 - Per-job payment tokens increase flexibility but also expand the attack surface; implementations SHOULD validate that payment token addresses are legitimate ERC-20 contracts (e.g. via an allowlist or registry check) to mitigate risks from malicious token contracts.
-- **Reentrancy:** Functions that transfer tokens SHALL be protected (e.g. reentrancy guard).
+- **Reentrancy:** Functions that transfer tokens SHALL be protected (e.g. reentrancy guard). Claim settlement transfers tokens mid-lifecycle (not only terminally), so effects-before-transfers ordering (update `settledAmount`, clear the pending claim, then transfer) is mandatory, not advisory.
 - **Tokens:** Use SafeERC-20 or equivalent for [ERC-20](./eip-20.md).
 - **Evaluator:** MUST be set at creation; if "client completes", pass `evaluator = client`.
 - **Hook gas limits** (for hooked implementations): Implementations SHOULD impose a gas limit on hook calls (e.g. `call{gas: HOOK_GAS_LIMIT}(...)`) to bound execution cost and prevent hooks from consuming unbounded gas. The specific limit is left to the implementation as gas costs vary across chains.
