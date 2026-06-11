@@ -19,6 +19,9 @@ contract ERC8183WithAuthorizationTest is Test {
     bytes32 constant CREATE_JOB_AUTHORIZATION_TYPEHASH = keccak256(
         "CreateJobAuthorization(address signer,address provider,address evaluator,uint48 expiredAt,bytes32 descriptionHash,address hook,uint256 providerAgentId,uint72 nonce,uint256 deadline)"
     );
+    bytes32 constant SET_PAYOUT_RECEIVER_AUTHORIZATION_TYPEHASH = keccak256(
+        "SetPayoutReceiverAuthorization(address signer,uint256 jobId,address payoutReceiver,uint72 nonce,uint256 deadline)"
+    );
     bytes32 constant SET_PROVIDER_AUTHORIZATION_TYPEHASH = keccak256(
         "SetProviderAuthorization(address signer,uint256 jobId,address provider,uint256 agentId,uint72 nonce,uint256 deadline)"
     );
@@ -63,6 +66,7 @@ contract ERC8183WithAuthorizationTest is Test {
     address relayer = makeAddr("relayer");
 
     event AuthorizationUsed(address indexed signer, bytes32 indexed nonce);
+    event PayoutReceiverSet(uint256 indexed jobId, address indexed payoutReceiver);
     event ClaimSubmitted(
         uint256 indexed jobId, address indexed provider, uint256 cumulativeAmount, uint256 delta, bytes32 deliverable
     );
@@ -203,6 +207,22 @@ contract ERC8183WithAuthorizationTest is Test {
                     nonce,
                     deadline
                 )
+            )
+        );
+    }
+
+    function _signSetPayoutReceiver(
+        uint256 signerPk,
+        address signer,
+        uint256 jobId,
+        address payoutReceiver,
+        uint72 nonce,
+        uint256 deadline
+    ) internal view returns (bytes memory) {
+        return _sign(
+            signerPk,
+            keccak256(
+                abi.encode(SET_PAYOUT_RECEIVER_AUTHORIZATION_TYPEHASH, signer, jobId, payoutReceiver, nonce, deadline)
             )
         );
     }
@@ -559,6 +579,64 @@ contract ERC8183WithAuthorizationTest is Test {
 
         assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Completed));
         assertEq(usdc.balanceOf(provider), TWENTY_USDC);
+    }
+
+    function test_createJobWithAuthorizationLeavesPayoutReceiverUnset() public {
+        uint48 expiry = _futureExpiry();
+        uint256 deadline = _deadline();
+        string memory description = "authorization receiver job";
+        uint72 nonce = 6;
+
+        assertEq(core.CREATE_JOB_AUTHORIZATION_TYPEHASH(), CREATE_JOB_AUTHORIZATION_TYPEHASH);
+
+        bytes memory sig = _signCreateJob(
+            clientPk, client, provider, evaluator, expiry, description, address(0), 0, nonce, deadline
+        );
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit AuthorizationUsed(client, _packNonce(client, nonce));
+        vm.prank(relayer);
+        uint256 jobId = core.createJobWithAuthorization(
+            _createParams(provider, evaluator, expiry, description, address(0), 0),
+            _auth(client, nonce, deadline, sig)
+        );
+
+        ERC8183.Job memory job = core.getJob(jobId);
+        assertEq(job.client, client);
+        assertEq(job.payoutReceiver, address(0));
+    }
+
+    function test_setPayoutReceiverWithAuthorization_ProviderOnlyOpenOnlyAndLocksAfterFund() public {
+        uint48 expiry = _futureExpiry();
+        uint256 deadline = _deadline();
+        uint256 jobId = _relayCreateJob(client, clientPk, provider, evaluator, expiry, "receiver auth job", 1, deadline);
+        address plainReceiver = makeAddr("plainReceiver");
+        address secondReceiver = makeAddr("secondReceiver");
+
+        assertEq(core.SET_PAYOUT_RECEIVER_AUTHORIZATION_TYPEHASH(), SET_PAYOUT_RECEIVER_AUTHORIZATION_TYPEHASH);
+
+        bytes memory clientSig = _signSetPayoutReceiver(clientPk, client, jobId, plainReceiver, 2, deadline);
+        vm.expectRevert(ERC8183.Unauthorized.selector);
+        vm.prank(relayer);
+        core.setPayoutReceiverWithAuthorization(jobId, plainReceiver, _auth(client, 2, deadline, clientSig));
+
+        bytes memory providerSig = _signSetPayoutReceiver(providerPk, provider, jobId, plainReceiver, 3, deadline);
+        vm.expectEmit(true, true, true, true, address(core));
+        emit AuthorizationUsed(provider, _packNonce(provider, 3));
+        vm.expectEmit(true, true, true, true, address(core));
+        emit PayoutReceiverSet(jobId, plainReceiver);
+        vm.prank(relayer);
+        core.setPayoutReceiverWithAuthorization(jobId, plainReceiver, _auth(provider, 3, deadline, providerSig));
+
+        assertEq(core.getJob(jobId).payoutReceiver, plainReceiver);
+
+        _relaySetBudget(jobId, 4, deadline);
+        _relayFund(jobId, 5, deadline);
+
+        bytes memory lockedSig = _signSetPayoutReceiver(providerPk, provider, jobId, secondReceiver, 6, deadline);
+        vm.expectRevert(ERC8183.WrongStatus.selector);
+        vm.prank(relayer);
+        core.setPayoutReceiverWithAuthorization(jobId, secondReceiver, _auth(provider, 6, deadline, lockedSig));
     }
 
     function test_relaysClientAuthorizedSetProvider() public {

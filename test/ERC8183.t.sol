@@ -11,6 +11,12 @@ import {ERC8183} from "../contracts/ERC8183.sol";
 import {IERC8183Hook} from "../contracts/IERC8183Hook.sol";
 import {MockUSDC} from "../contracts/mocks/MockUSDC.sol";
 import {MockCBBTC} from "../contracts/mocks/MockCBBTC.sol";
+import {
+    IReentrantERC8183,
+    MockDisburser,
+    NotADisburser,
+    ReentrantDisburser
+} from "../contracts/mocks/MockDisburser.sol";
 import {MockFeeOnTransferToken} from "../contracts/mocks/MockFeeOnTransferToken.sol";
 
 contract PendingClaimObserverHook is IERC8183Hook {
@@ -62,7 +68,9 @@ contract ERC8183Test is Test {
     event JobFunded(uint256 indexed jobId, address indexed client, uint256 amount);
     event JobSubmitted(uint256 indexed jobId, address indexed provider, bytes32 deliverable);
     event JobCompleted(uint256 indexed jobId, address indexed evaluator, bytes32 reason);
-    event PaymentReleased(uint256 indexed jobId, address indexed provider, uint256 amount);
+    event PaymentReleased(uint256 indexed jobId, address indexed recipient, uint256 amount);
+    event PayoutReceiverSet(uint256 indexed jobId, address indexed payoutReceiver);
+    event Disbursed(uint256 indexed jobId, address indexed receiver, bytes4 selector, uint256 amount);
     event PaymentTokenAllowlistUpdated(address indexed token, bool status);
     event Settled(uint256 indexed jobId, uint256 cumulativeAmount, uint256 delta);
     event ClaimSubmitted(
@@ -101,12 +109,26 @@ contract ERC8183Test is Test {
     }
 
     function _createFundedJob(uint256 amount) internal returns (uint256 jobId) {
+        return _createFundedJob(amount, address(0));
+    }
+
+    function _createFundedJob(uint256 amount, address payoutReceiver) internal returns (uint256 jobId) {
         vm.prank(client);
         jobId = core.createJob(provider, evaluator, _futureExpiry(), "claim job", address(0), 0);
+        if (payoutReceiver != address(0)) {
+            vm.prank(provider);
+            core.setPayoutReceiver(jobId, payoutReceiver);
+        }
         vm.prank(provider);
         core.setBudget(jobId, address(usdc), amount, "");
         vm.prank(client);
         core.fund(jobId, amount, "");
+    }
+
+    function _createSubmittedJob(address payoutReceiver) internal returns (uint256 jobId) {
+        jobId = _createFundedJob(TWENTY_USDC, payoutReceiver);
+        vm.prank(provider);
+        core.submit(jobId, bytes32("done"), "");
     }
 
     function _claimBindingHash(uint256 amount, bytes32 deliverable, bytes memory optParams)
@@ -123,6 +145,21 @@ contract ERC8183Test is Test {
             if (entries[i].topics.length > 0 && entries[i].topics[0] == topic) return true;
         }
         return false;
+    }
+
+    function _assertReentryBlocked(ReentrantDisburser disburser) internal view {
+        assertTrue(disburser.attempted());
+        assertFalse(disburser.reentered());
+        assertTrue(disburser.reentryReverted());
+
+        bytes memory revertData = disburser.revertData();
+        assertEq(revertData.length, 4);
+
+        bytes4 actualSelector;
+        assembly {
+            actualSelector := mload(add(revertData, 32))
+        }
+        assertEq(actualSelector, bytes4(keccak256("ReentrancyGuardReentrantCall()")));
     }
 
     // ──────────────────────────────────────────────────────────
@@ -470,8 +507,9 @@ contract ERC8183Test is Test {
         assertEq(usdc.balanceOf(address(core)), TEN_USDC);
     }
 
-    function test_claims_SettleClaimSkipsPaymentReleasedWhenNetZero() public {
-        uint256 jobId = _createFundedJob(TWENTY_USDC);
+    function test_claims_SettleClaimSkipsPaymentAndCallbackWhenNetZero() public {
+        MockDisburser disburser = new MockDisburser();
+        uint256 jobId = _createFundedJob(TWENTY_USDC, address(disburser));
 
         vm.prank(deployer);
         core.setEvaluatorFee(10_000);
@@ -484,6 +522,8 @@ contract ERC8183Test is Test {
         assertFalse(_hasPaymentReleasedLog(entries));
         assertEq(usdc.balanceOf(evaluator), TEN_USDC);
         assertEq(usdc.balanceOf(provider), 0);
+        assertEq(usdc.balanceOf(address(disburser)), 0);
+        assertEq(disburser.callCount(), 0);
     }
 
     function test_claims_NonzeroDeliverableRecordsPendingHashAndSettlesOnApproval() public {
@@ -518,6 +558,385 @@ contract ERC8183Test is Test {
         assertEq(core.pendingClaimHash(jobId), bytes32(0));
         assertEq(usdc.balanceOf(provider), TEN_USDC);
         assertEq(usdc.balanceOf(address(core)), TEN_USDC);
+    }
+
+    function test_payoutReceiver_ZeroAddressKeepsPayProviderDirectlyBehavior() public {
+        uint256 jobId = _createSubmittedJob(address(0));
+
+        assertEq(core.getJob(jobId).payoutReceiver, address(0));
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit PaymentReleased(jobId, provider, TWENTY_USDC);
+        vm.prank(evaluator);
+        core.complete(jobId, bytes32("ok"), "");
+
+        assertEq(usdc.balanceOf(provider), TWENTY_USDC);
+    }
+
+    function test_payoutReceiver_DisburserContractReceivesFundsAndCallback() public {
+        MockDisburser disburser = new MockDisburser();
+        uint256 jobId = _createSubmittedJob(address(disburser));
+
+        bytes4 completeSelector = core.complete.selector;
+        bytes memory callbackData = hex"deadbeef";
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit PaymentReleased(jobId, address(disburser), TWENTY_USDC);
+        vm.expectEmit(true, true, true, true, address(core));
+        emit Disbursed(jobId, address(disburser), completeSelector, TWENTY_USDC);
+        vm.prank(evaluator);
+        core.complete(jobId, bytes32("ok"), callbackData);
+
+        assertEq(usdc.balanceOf(address(disburser)), TWENTY_USDC);
+        assertEq(disburser.callCount(), 1);
+        assertEq(disburser.lastJobId(), jobId);
+        assertEq(disburser.lastSelector(), completeSelector);
+        assertEq(disburser.lastToken(), address(usdc));
+        assertEq(disburser.lastAmount(), TWENTY_USDC);
+        assertEq(disburser.lastData(), callbackData);
+    }
+
+    function test_payoutReceiver_CompletionPaysFeesAndReceiverGetsOnlyNet() public {
+        MockDisburser disburser = new MockDisburser();
+        uint256 jobId = _createSubmittedJob(address(disburser));
+
+        vm.startPrank(deployer);
+        core.setPlatformFee(1_000, deployer);
+        core.setEvaluatorFee(1_000);
+        vm.stopPrank();
+
+        uint256 fee = 2_000_000;
+        uint256 net = 16_000_000;
+
+        vm.prank(evaluator);
+        core.complete(jobId, bytes32("ok"), "");
+
+        assertEq(usdc.balanceOf(deployer), fee);
+        assertEq(usdc.balanceOf(evaluator), fee);
+        assertEq(usdc.balanceOf(address(disburser)), net);
+        assertEq(usdc.balanceOf(provider), 0);
+        assertEq(disburser.lastAmount(), net);
+    }
+
+    function test_payoutReceiver_EOAReceiverReceivesFundsWithoutCallback() public {
+        address payoutReceiver = makeAddr("payoutReceiver");
+        uint256 jobId = _createSubmittedJob(payoutReceiver);
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit PaymentReleased(jobId, payoutReceiver, TWENTY_USDC);
+        vm.recordLogs();
+        vm.prank(evaluator);
+        core.complete(jobId, bytes32("ok"), "");
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 disbursedTopic = keccak256("Disbursed(uint256,address,bytes4,uint256)");
+        for (uint256 i = 0; i < logs.length; i++) {
+            assertFalse(logs[i].topics[0] == disbursedTopic);
+        }
+        assertEq(usdc.balanceOf(payoutReceiver), TWENTY_USDC);
+    }
+
+    function test_payoutReceiver_NonDisburserContractReceivesFundsWithoutCallback() public {
+        NotADisburser receiver = new NotADisburser();
+        uint256 jobId = _createSubmittedJob(address(receiver));
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit PaymentReleased(jobId, address(receiver), TWENTY_USDC);
+        vm.recordLogs();
+        vm.prank(evaluator);
+        core.complete(jobId, bytes32("ok"), "");
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 disbursedTopic = keccak256("Disbursed(uint256,address,bytes4,uint256)");
+        for (uint256 i = 0; i < logs.length; i++) {
+            assertFalse(logs[i].topics[0] == disbursedTopic);
+        }
+        assertEq(usdc.balanceOf(address(receiver)), TWENTY_USDC);
+    }
+
+    function test_payoutReceiver_RevertsWhenReceiverIsEscrow() public {
+        vm.prank(client);
+        core.createJob(provider, evaluator, _futureExpiry(), "setter self receiver", address(0), 0);
+
+        vm.expectRevert(ERC8183.InvalidReceiver.selector);
+        vm.prank(provider);
+        core.setPayoutReceiver(1, address(core));
+    }
+
+    function test_payoutReceiver_RevertsWhenReceiverIsPaymentTokenAfterBudget() public {
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, _futureExpiry(), "receiver token", address(0), 0);
+
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
+
+        vm.expectRevert(ERC8183.InvalidReceiver.selector);
+        vm.prank(provider);
+        core.setPayoutReceiver(jobId, address(usdc));
+    }
+
+    function test_setBudget_RevertsWhenExistingReceiverIsPaymentToken() public {
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, _futureExpiry(), "budget token receiver", address(0), 0);
+
+        vm.prank(provider);
+        core.setPayoutReceiver(jobId, address(usdc));
+
+        vm.expectRevert(ERC8183.InvalidReceiver.selector);
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
+    }
+
+    function test_payoutReceiver_RefundsClientWhenReceiverIsSet() public {
+        address payoutReceiver = makeAddr("payoutReceiver");
+        uint48 expiry = _futureExpiry();
+
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, expiry, "refund receiver", address(0), 0);
+
+        vm.prank(provider);
+        core.setPayoutReceiver(jobId, payoutReceiver);
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, TWENTY_USDC, "");
+
+        vm.warp(uint256(expiry) + 1);
+        core.claimRefund(jobId);
+
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Expired));
+        assertEq(usdc.balanceOf(client), TWENTY_USDC);
+        assertEq(usdc.balanceOf(provider), 0);
+        assertEq(usdc.balanceOf(payoutReceiver), 0);
+        assertEq(usdc.balanceOf(address(core)), 0);
+    }
+
+    function test_setPayoutReceiver_ProviderOnlyOpenOnlyAcceptsPlainContractsAndLocksAfterFund() public {
+        MockDisburser disburser = new MockDisburser();
+        NotADisburser plainReceiver = new NotADisburser();
+        uint48 expiry = _futureExpiry();
+
+        vm.prank(client);
+        core.createJob(provider, evaluator, expiry, "setter test", address(0), 0);
+        uint256 jobId = 1;
+
+        vm.expectRevert(ERC8183.Unauthorized.selector);
+        vm.prank(client);
+        core.setPayoutReceiver(jobId, address(disburser));
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit PayoutReceiverSet(jobId, address(plainReceiver));
+        vm.prank(provider);
+        core.setPayoutReceiver(jobId, address(plainReceiver));
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit PayoutReceiverSet(jobId, address(disburser));
+        vm.prank(provider);
+        core.setPayoutReceiver(jobId, address(disburser));
+        assertEq(core.getJob(jobId).payoutReceiver, address(disburser));
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit PayoutReceiverSet(jobId, address(0));
+        vm.prank(provider);
+        core.setPayoutReceiver(jobId, address(0));
+        assertEq(core.getJob(jobId).payoutReceiver, address(0));
+
+        vm.prank(provider);
+        core.setPayoutReceiver(jobId, address(disburser));
+
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, TWENTY_USDC, "");
+
+        vm.expectRevert(ERC8183.WrongStatus.selector);
+        vm.prank(provider);
+        core.setPayoutReceiver(jobId, address(0));
+    }
+
+    function test_setPayoutReceiver_RevertsForInvalidJob() public {
+        vm.expectRevert(ERC8183.InvalidJob.selector);
+        vm.prank(provider);
+        core.setPayoutReceiver(1, address(0));
+    }
+
+    function test_setPayoutReceiver_AssignedProviderCanSetReceiver() public {
+        address payoutReceiver = makeAddr("assignedProviderReceiver");
+
+        vm.prank(client);
+        core.createJob(address(0), evaluator, _futureExpiry(), "late receiver provider", address(0), 0);
+
+        vm.prank(client);
+        core.setProvider(1, provider, 0);
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit PayoutReceiverSet(1, payoutReceiver);
+        vm.prank(provider);
+        core.setPayoutReceiver(1, payoutReceiver);
+
+        assertEq(core.getJob(1).payoutReceiver, payoutReceiver);
+    }
+
+    function test_setPayoutReceiver_RevertsAfterExpiry() public {
+        uint48 expiry = _futureExpiry();
+
+        vm.prank(client);
+        core.createJob(provider, evaluator, expiry, "expired receiver", address(0), 0);
+
+        vm.warp(uint256(expiry));
+        vm.expectRevert(ERC8183.WrongStatus.selector);
+        vm.prank(provider);
+        core.setPayoutReceiver(1, makeAddr("lateReceiver"));
+    }
+
+    function test_complete_RevertsWhenReceiverDisburserRevertsStrictly() public {
+        MockDisburser disburser = new MockDisburser();
+        uint256 jobId = _createSubmittedJob(address(disburser));
+
+        disburser.setShouldRevert(true);
+
+        vm.expectRevert(bytes("MockDisburser: forced revert"));
+        vm.prank(evaluator);
+        core.complete(jobId, bytes32("ok"), "");
+
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Submitted));
+        assertEq(usdc.balanceOf(address(core)), TWENTY_USDC);
+    }
+
+    function test_payoutReceiver_ReentrantDisburserCannotReenterSettleClaim() public {
+        ReentrantDisburser disburser = new ReentrantDisburser();
+        uint256 jobId = _createFundedJob(TWENTY_USDC, address(disburser));
+        disburser.setReentry(
+            IReentrantERC8183(address(core)), jobId, TWENTY_USDC, ReentrantDisburser.Action.SettleClaim
+        );
+
+        vm.prank(client);
+        core.settleClaim(jobId, TEN_USDC, EMPTY_DELIVERABLE, "");
+
+        assertEq(core.getJob(jobId).settledAmount, TEN_USDC);
+        assertEq(usdc.balanceOf(address(disburser)), TEN_USDC);
+        _assertReentryBlocked(disburser);
+    }
+
+    function test_payoutReceiver_ReentrantDisburserCannotReenterComplete() public {
+        ReentrantDisburser disburser = new ReentrantDisburser();
+        uint256 jobId = _createSubmittedJob(address(disburser));
+        disburser.setReentry(IReentrantERC8183(address(core)), jobId, 0, ReentrantDisburser.Action.Complete);
+
+        vm.prank(evaluator);
+        core.complete(jobId, bytes32("ok"), "");
+
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Completed));
+        assertEq(usdc.balanceOf(address(disburser)), TWENTY_USDC);
+        _assertReentryBlocked(disburser);
+    }
+
+    function test_payoutReceiver_ReentrantDisburserCannotReenterClaimRefund() public {
+        ReentrantDisburser disburser = new ReentrantDisburser();
+        uint256 jobId = _createFundedJob(TWENTY_USDC, address(disburser));
+        disburser.setReentry(IReentrantERC8183(address(core)), jobId, 0, ReentrantDisburser.Action.ClaimRefund);
+
+        vm.prank(client);
+        core.settleClaim(jobId, TEN_USDC, EMPTY_DELIVERABLE, "");
+
+        assertEq(core.getJob(jobId).settledAmount, TEN_USDC);
+        assertEq(usdc.balanceOf(address(disburser)), TEN_USDC);
+        _assertReentryBlocked(disburser);
+    }
+
+    function test_claims_SettleClaimPaysReceiverAndFiresDisbursement() public {
+        MockDisburser disburser = new MockDisburser();
+        uint256 jobId = _createFundedJob(TWENTY_USDC, address(disburser));
+        bytes memory callbackData = hex"cafe";
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit PaymentReleased(jobId, address(disburser), TEN_USDC);
+        vm.expectEmit(true, true, true, true, address(core));
+        emit Disbursed(jobId, address(disburser), core.settleClaim.selector, TEN_USDC);
+        vm.expectEmit(true, true, true, true, address(core));
+        emit Settled(jobId, TEN_USDC, TEN_USDC);
+        vm.expectEmit(true, true, true, true, address(core));
+        emit ClaimSettled(jobId, client, TEN_USDC, TEN_USDC, EMPTY_DELIVERABLE);
+        vm.prank(client);
+        core.settleClaim(jobId, TEN_USDC, EMPTY_DELIVERABLE, callbackData);
+
+        assertEq(core.getJob(jobId).settledAmount, TEN_USDC);
+        assertEq(usdc.balanceOf(address(disburser)), TEN_USDC);
+        assertEq(usdc.balanceOf(provider), 0);
+        assertEq(disburser.callCount(), 1);
+        assertEq(disburser.lastSelector(), core.settleClaim.selector);
+        assertEq(disburser.lastData(), callbackData);
+    }
+
+    function test_claims_SettleClaimRevertsWhenReceiverDisburserRevertsStrictly() public {
+        MockDisburser disburser = new MockDisburser();
+        uint256 jobId = _createFundedJob(TWENTY_USDC, address(disburser));
+
+        disburser.setShouldRevert(true);
+
+        vm.expectRevert(bytes("MockDisburser: forced revert"));
+        vm.prank(client);
+        core.settleClaim(jobId, TEN_USDC, EMPTY_DELIVERABLE, "");
+
+        assertEq(core.getJob(jobId).settledAmount, 0);
+        assertEq(core.pendingClaimHash(jobId), bytes32(0));
+        assertEq(usdc.balanceOf(address(core)), TWENTY_USDC);
+        assertEq(usdc.balanceOf(address(disburser)), 0);
+        assertEq(usdc.balanceOf(provider), 0);
+    }
+
+    function test_claims_ApprovedNonzeroDeliverableSettlementPaysReceiverAndFiresDisbursement() public {
+        MockDisburser disburser = new MockDisburser();
+        uint256 jobId = _createFundedJob(TWENTY_USDC, address(disburser));
+        bytes32 deliverable = bytes32("milestone-1");
+        bytes memory optParams = hex"1234";
+
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, deliverable, optParams);
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit PaymentReleased(jobId, address(disburser), TEN_USDC);
+        vm.expectEmit(true, true, true, true, address(core));
+        emit Disbursed(jobId, address(disburser), core.approveClaim.selector, TEN_USDC);
+        vm.expectEmit(true, true, true, true, address(core));
+        emit Settled(jobId, TEN_USDC, TEN_USDC);
+        vm.expectEmit(true, true, true, true, address(core));
+        emit ClaimApproved(jobId, evaluator, TEN_USDC, TEN_USDC, deliverable);
+        vm.prank(evaluator);
+        core.approveClaim(jobId, TEN_USDC, deliverable, optParams);
+
+        assertEq(core.getJob(jobId).settledAmount, TEN_USDC);
+        assertEq(core.pendingClaimHash(jobId), bytes32(0));
+        assertEq(usdc.balanceOf(address(disburser)), TEN_USDC);
+        assertEq(usdc.balanceOf(provider), 0);
+        assertEq(disburser.callCount(), 1);
+        assertEq(disburser.lastSelector(), core.approveClaim.selector);
+        assertEq(disburser.lastData(), optParams);
+    }
+
+    function test_claims_ApproveClaimRevertsWhenReceiverDisburserRevertsStrictly() public {
+        MockDisburser disburser = new MockDisburser();
+        uint256 jobId = _createFundedJob(TWENTY_USDC, address(disburser));
+        bytes32 deliverable = bytes32("milestone-1");
+        bytes memory optParams = hex"1234";
+
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, deliverable, optParams);
+
+        bytes32 claimHash = _claimBindingHash(TEN_USDC, deliverable, optParams);
+        assertEq(core.pendingClaimHash(jobId), claimHash);
+
+        disburser.setShouldRevert(true);
+
+        vm.expectRevert(bytes("MockDisburser: forced revert"));
+        vm.prank(evaluator);
+        core.approveClaim(jobId, TEN_USDC, deliverable, optParams);
+
+        assertEq(core.getJob(jobId).settledAmount, 0);
+        assertEq(core.pendingClaimHash(jobId), claimHash);
+        assertEq(usdc.balanceOf(address(core)), TWENTY_USDC);
+        assertEq(usdc.balanceOf(address(disburser)), 0);
+        assertEq(usdc.balanceOf(provider), 0);
     }
 
     function test_claims_SubmitClaimRejectsZeroDeliverableAndPendingOverwrite() public {

@@ -10,6 +10,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import "./IERC8183Hook.sol";
+import "./IDisburser.sol";
 import "@openzeppelin/contracts/utils/introspection/ERC165Checker.sol";
 import "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
 
@@ -38,7 +39,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         Expired
     }
 
-    /// @notice Core job data; static fields occupy 9 storage slots, plus dynamic description storage
+    /// @notice Core job data, with new fields appended to preserve storage layout
     /// @param client           Job creator who funds the escrow
     /// @param status           Current lifecycle state
     /// @param provider         Service provider who delivers work
@@ -51,6 +52,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     /// @param providerAgentId  Optional ERC-8004 agent identity for provider
     /// @param description      Human-readable job description
     /// @param settledAmount    Cumulative gross amount released via claim settlements
+    /// @param payoutReceiver   Provider-side payout receiver (address(0) = pay provider directly)
     struct Job {
         address client;             // 20 ──┐ slot 1
         JobStatus status;           // 1  ──┘
@@ -64,6 +66,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         uint256 providerAgentId;    // 32 ──  slot 7
         string description;         //        slot 8+
         uint256 settledAmount;      // 32 ──  slot 9
+        address payoutReceiver;     // 20 ──  slot 10
     }
 
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
@@ -112,6 +115,18 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         address indexed provider, 
         uint256 agentId
     );
+    /// @notice Emitted when the payout receiver for a job is set or updated
+    event PayoutReceiverSet(
+        uint256 indexed jobId,
+        address indexed payoutReceiver
+    );
+    /// @notice Emitted when onDisbursement is invoked for a receiver that advertises IDisburser
+    event Disbursed(
+        uint256 indexed jobId,
+        address indexed receiver,
+        bytes4 selector,
+        uint256 amount
+    );
     /// @notice Emitted when the provider sets or updates the job budget
     event BudgetSet(
         uint256 indexed jobId, 
@@ -149,7 +164,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     /// @notice Emitted when the provider's net payment is released
     event PaymentReleased(
         uint256 indexed jobId,
-        address indexed provider,
+        address indexed recipient,
         uint256 amount
     );
     /// @notice Emitted when the platform fee gets distributed
@@ -243,6 +258,8 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     error InvalidJob();
     /// @notice Thrown when the hook does not support interface IERC8183Hook
     error InvalidHook();
+    /// @notice Thrown when the payout receiver would strand funds in this escrow
+    error InvalidReceiver();
     /// @notice Thrown when the job is not in a valid status for the requested action
     error WrongStatus();
     /// @notice Thrown when the caller is not authorized for the requested action
@@ -438,6 +455,45 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         }
     }
 
+    /// @dev Only receivers with deployed code can receive the optional callback.
+    ///      EOAs and contracts that do not advertise IDisburser are plain recipients.
+    function _isDisburser(address receiver) internal view returns (bool) {
+        return receiver.code.length > 0 && ERC165Checker.supportsInterface(
+            receiver,
+            type(IDisburser).interfaceId
+        );
+    }
+
+    function _payout(
+        uint256 jobId,
+        Job storage job,
+        uint256 net,
+        bytes4 selector,
+        bytes calldata optParams
+    ) internal {
+        address recipient = job.payoutReceiver == address(0) ? job.provider : job.payoutReceiver;
+        if (net > 0) {
+            IERC20(job.paymentToken).safeTransfer(recipient, net);
+            emit PaymentReleased(jobId, recipient, net);
+
+            if (_isDisburser(recipient)) {
+                IDisburser(recipient).onDisbursement(
+                    jobId,
+                    selector,
+                    job.paymentToken,
+                    net,
+                    optParams
+                );
+                emit Disbursed(jobId, recipient, selector, net);
+            }
+        }
+    }
+
+    function _validatePayoutReceiver(address payoutReceiver, address paymentToken) internal view {
+        if (payoutReceiver == address(this)) revert InvalidReceiver();
+        if (payoutReceiver != address(0) && payoutReceiver == paymentToken) revert InvalidReceiver();
+    }
+
     // ──────────────────── Job Lifecycle ────────────────────
 
     /// @notice Creates a new job. Client is msg.sender.
@@ -496,7 +552,8 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
             paymentToken: address(0),
             providerAgentId: provider != address(0) ? providerAgentId : 0,
             description: description,
-            settledAmount: 0
+            settledAmount: 0,
+            payoutReceiver: address(0)
         });
 
         emit JobCreated(
@@ -507,8 +564,26 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
             expiredAt,
             hook
         );
-
         return jobId;
+    }
+
+    /// @notice Provider updates the payout receiver while the job is still Open.
+    ///         Locked once the job is funded.
+    /// @param jobId The job to update
+    /// @param payoutReceiver New payout receiver (address(0) = pay provider directly)
+    function setPayoutReceiver(uint256 jobId, address payoutReceiver) external whenNotPaused nonReentrant {
+        _setPayoutReceiver(msg.sender, jobId, payoutReceiver);
+    }
+
+    function _setPayoutReceiver(address actor, uint256 jobId, address payoutReceiver) internal {
+        Job storage job = jobs[jobId];
+        if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
+        if (job.status != JobStatus.Open) revert WrongStatus();
+        if (block.timestamp >= job.expiredAt) revert WrongStatus();
+        if (actor != job.provider) revert Unauthorized();
+        _validatePayoutReceiver(payoutReceiver, job.paymentToken);
+        job.payoutReceiver = payoutReceiver;
+        emit PayoutReceiverSet(jobId, payoutReceiver);
     }
 
     /// @notice Assigns a provider to an Open job that has no provider yet. Client only.
@@ -561,6 +636,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         if (actor != job.provider) revert Unauthorized();
         if (token == address(0)) revert ZeroAddress();
         if (!allowedPaymentTokens[token]) revert PaymentTokenNotAllowed();
+        _validatePayoutReceiver(job.payoutReceiver, token);
 
         bytes memory data = abi.encode(actor, token, amount, optParams);
         _beforeHook(job.hook, jobId, this.setBudget.selector, data);
@@ -704,10 +780,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
             token.safeTransfer(job.evaluator, evalFee);
             emit EvaluatorFeePaid(jobId, job.evaluator, evalFee);
         }
-        if (net > 0) {
-            token.safeTransfer(job.provider, net);
-            emit PaymentReleased(jobId, job.provider, net);
-        }
+        _payout(jobId, job, net, this.complete.selector, optParams);
 
         emit JobCompleted(jobId, actor, reason);
 
@@ -807,7 +880,9 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     function _distributeSettlement(
         uint256 jobId,
         Job storage job,
-        uint256 delta
+        uint256 delta,
+        bytes4 selector,
+        bytes calldata optParams
     ) internal {
         uint256 platformFee = (delta * platformFeeBP) / 10000;
         uint256 evalFee = (delta * evaluatorFeeBP) / 10000;
@@ -822,10 +897,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
             token.safeTransfer(job.evaluator, evalFee);
             emit EvaluatorFeePaid(jobId, job.evaluator, evalFee);
         }
-        if (net > 0) {
-            token.safeTransfer(job.provider, net);
-            emit PaymentReleased(jobId, job.provider, net);
-        }
+        _payout(jobId, job, net, selector, optParams);
     }
 
     function _claimHash(
@@ -906,7 +978,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         _beforeHook(job.hook, jobId, this.settleClaim.selector, data);
 
         job.settledAmount = cumulativeAmount;
-        _distributeSettlement(jobId, job, delta);
+        _distributeSettlement(jobId, job, delta, this.settleClaim.selector, optParams);
 
         emit Settled(jobId, cumulativeAmount, delta);
         emit ClaimSettled(jobId, actor, cumulativeAmount, delta, deliverable);
@@ -948,7 +1020,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
 
         delete pendingClaimHash[jobId];
         job.settledAmount = cumulativeAmount;
-        _distributeSettlement(jobId, job, delta);
+        _distributeSettlement(jobId, job, delta, this.approveClaim.selector, optParams);
 
         emit Settled(jobId, cumulativeAmount, delta);
         emit ClaimApproved(jobId, actor, cumulativeAmount, delta, deliverable);
