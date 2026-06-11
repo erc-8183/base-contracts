@@ -147,6 +147,7 @@ function fund(
 - `beforeAction` can revert to gate transitions — this is intentional and by design.
 - `afterAction` reverts roll back the whole transaction — hook state must stay consistent with core state.
 - `claimRefund` is intentionally not hookable, but it still requires pending provider claims to be resolved first.
+- `settleClaim` can run while a provider claim is pending; it updates cumulative settlement but does not close the pending claim lifecycle.
 - `approveClaim` and `rejectClaim` are hookable resolution actions; trusted hooks can gate them like other business transitions.
 - When `submit` supersedes a pending claim, the pending claim is cleared before submit hooks run so hooks observe the post-supersede state.
 - A `Submitted` job cannot be force-refunded for `EVALUATION_GRACE_PERIOD` (1 hour) past `expiredAt`, giving the evaluator a censorship-resistant window to call `complete` or `reject`.

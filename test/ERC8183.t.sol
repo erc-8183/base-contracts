@@ -524,16 +524,41 @@ contract ERC8183Test is Test {
         core.submitClaim(jobId, TWENTY_USDC, bytes32("milestone-2"), "");
     }
 
-    function test_claims_SettleClaimRevertsWhilePendingClaimExists() public {
+    function test_claims_SettleClaimContinuesWhilePendingClaimExists() public {
         uint256 jobId = _createFundedJob(TWENTY_USDC);
         bytes32 deliverable = bytes32("milestone-1");
 
         vm.prank(provider);
-        core.submitClaim(jobId, TEN_USDC, deliverable, "");
+        core.submitClaim(jobId, TWENTY_USDC, deliverable, "");
+        assertEq(core.pendingClaimHash(jobId), _claimBindingHash(TWENTY_USDC, deliverable, ""));
 
-        vm.expectRevert(ERC8183.PendingClaimExists.selector);
+        vm.expectEmit(true, true, true, true, address(core));
+        emit PaymentReleased(jobId, provider, TEN_USDC);
+        vm.expectEmit(true, true, true, true, address(core));
+        emit Settled(jobId, TEN_USDC, TEN_USDC);
+        vm.expectEmit(true, true, true, true, address(core));
+        emit ClaimSettled(jobId, client, TEN_USDC, TEN_USDC, deliverable);
         vm.prank(client);
         core.settleClaim(jobId, TEN_USDC, deliverable, "");
+
+        assertEq(core.getJob(jobId).settledAmount, TEN_USDC);
+        assertEq(core.pendingClaimHash(jobId), _claimBindingHash(TWENTY_USDC, deliverable, ""));
+        assertEq(usdc.balanceOf(provider), TEN_USDC);
+        assertEq(usdc.balanceOf(address(core)), TEN_USDC);
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit PaymentReleased(jobId, provider, TEN_USDC);
+        vm.expectEmit(true, true, true, true, address(core));
+        emit Settled(jobId, TWENTY_USDC, TEN_USDC);
+        vm.expectEmit(true, true, true, true, address(core));
+        emit ClaimApproved(jobId, evaluator, TWENTY_USDC, TEN_USDC, deliverable);
+        vm.prank(evaluator);
+        core.approveClaim(jobId, TWENTY_USDC, deliverable, "");
+
+        assertEq(core.getJob(jobId).settledAmount, TWENTY_USDC);
+        assertEq(core.pendingClaimHash(jobId), bytes32(0));
+        assertEq(usdc.balanceOf(provider), TWENTY_USDC);
+        assertEq(usdc.balanceOf(address(core)), 0);
     }
 
     function test_claims_SubmitClearsPendingClaimAndCompletesFullEscrow() public {

@@ -61,6 +61,7 @@ contracts/
 - **Fee-on-transfer / rebasing rejection** — `fund` snapshots the contract balance and reverts if the received amount differs from the budget
 - **Evaluator grace period** — after expiry, a Submitted job cannot be force-refunded for `EVALUATION_GRACE_PERIOD` (1 hour), giving the evaluator time to complete or reject
 - **Claim settlement fees** — direct settlements and approved claims both use the configured platform/evaluator fee split for the settled delta
+- **Streaming settlement independence** — direct `settleClaim` calls can continue while a provider milestone claim is pending; the pending claim stays open until explicitly resolved
 - **Pending claim resolution** — after expiry, a Funded job with a pending provider claim cannot be force-refunded until the claim is approved, rejected, or withdrawn; if all parties stay idle, escrow remains parked
 - **Claim replay guard** — rejected claim hashes stay consumed, so providers must vary the deliverable or `optParams` to refile
 - **Authorization extension** — `ERC8183WithAuthorization` uses the base `ERC8183` EIP-712 domain so relayed entrypoints extend the same protocol identity

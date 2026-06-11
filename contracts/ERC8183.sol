@@ -896,7 +896,6 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         if (actor != job.client) revert Unauthorized();
         if (job.status != JobStatus.Funded) revert WrongStatus();
         if (block.timestamp >= job.expiredAt) revert WrongStatus();
-        if (pendingClaimHash[jobId] != bytes32(0)) revert PendingClaimExists();
         if (cumulativeAmount <= job.settledAmount) revert NoNewSettlement();
         if (cumulativeAmount > job.budget) revert ExceedsBudget();
 
