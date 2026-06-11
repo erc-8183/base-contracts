@@ -33,4 +33,5 @@ You may follow these steps to contribute:
 Here are some additional things to keep in mind during the process:
 
 - **Test your changes.** Before you submit a pull request, make sure that your changes work as expected.
+- **Update docs with contract-surface changes.** If a change adds, removes, or changes a public/external contract function, event, error, storage getter, role, or authorization flow, update README/docs/NatSpec in the same commit or explain why no documentation change is needed.
 - **Be patient.** It may take some time for your pull request to be reviewed and merged.

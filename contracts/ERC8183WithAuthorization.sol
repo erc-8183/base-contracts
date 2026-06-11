@@ -28,13 +28,16 @@ contract ERC8183WithAuthorization is ERC8183 {
     bytes32 public constant REJECT_AUTHORIZATION_TYPEHASH = keccak256(
         "RejectAuthorization(address signer,uint256 jobId,bytes32 reason,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
-    bytes32 private constant SUBMIT_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
+    bytes32 public constant SUBMIT_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
         "SubmitClaimAuthorization(address signer,uint256 jobId,uint256 cumulativeAmount,bytes32 deliverable,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
-    bytes32 private constant APPROVE_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
+    bytes32 public constant SETTLE_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
+        "SettleClaimAuthorization(address signer,uint256 jobId,uint256 cumulativeAmount,bytes32 deliverable,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
+    );
+    bytes32 public constant APPROVE_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
         "ApproveClaimAuthorization(address signer,uint256 jobId,uint256 cumulativeAmount,bytes32 deliverable,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
-    bytes32 private constant REJECT_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
+    bytes32 public constant REJECT_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
         "RejectClaimAuthorization(address signer,uint256 jobId,uint256 cumulativeAmount,bytes32 deliverable,bytes32 reason,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
 
@@ -64,11 +67,28 @@ contract ERC8183WithAuthorization is ERC8183 {
     error InvalidAuthorizationSignature();
 
     function initialize(address treasury_, address admin_) public override initializer {
-        __ERC8183_init(treasury_, admin_, "ERC8183WithAuthorization", "1");
+        __ERC8183_init(treasury_, admin_, EIP712_NAME, EIP712_VERSION);
+    }
+
+    /// @notice Admin-only initializer for EIP-712 storage when adding authorization support to an existing ERC8183 proxy.
+    /// @dev Sets the ERC8183/1 domain; do not call on proxies using another domain unless invalidating outstanding
+    ///      signatures is intended.
+    function initializeAuthorizationV2() public reinitializer(2) onlyRole(DEFAULT_ADMIN_ROLE) {
+        __EIP712_init(EIP712_NAME, EIP712_VERSION);
     }
 
     function DOMAIN_SEPARATOR() external view returns (bytes32) {
         return _domainSeparatorV4();
+    }
+
+    /// @notice Burns one of msg.sender's authorization nonces so a signed authorization cannot be relayed later.
+    /// @dev This is intentionally not relayed: only the signer can nullify their own outstanding authorization.
+    ///      It is deliberately callable while paused so signers can revoke outstanding signatures during incidents.
+    function cancelAuthorization(uint72 nonce) external nonReentrant {
+        bytes32 packedNonce = _packAuthorizationNonce(msg.sender, nonce);
+        if (authorizationNonceUsed[packedNonce]) revert AuthorizationNonceUsed();
+        authorizationNonceUsed[packedNonce] = true;
+        emit AuthorizationUsed(msg.sender, packedNonce);
     }
 
     function createJobWithAuthorization(
@@ -250,6 +270,34 @@ contract ERC8183WithAuthorization is ERC8183 {
             auth.sig
         );
         _submitClaim(auth.signer, jobId, cumulativeAmount, deliverable, optParams);
+    }
+
+    function settleClaimWithAuthorization(
+        uint256 jobId,
+        uint256 cumulativeAmount,
+        bytes32 deliverable,
+        bytes calldata optParams,
+        Authorization calldata auth
+    ) external whenNotPaused nonReentrant {
+        _verifyAuthorization(
+            auth.signer,
+            auth.nonce,
+            auth.deadline,
+            keccak256(
+                abi.encode(
+                    SETTLE_CLAIM_AUTHORIZATION_TYPEHASH,
+                    auth.signer,
+                    jobId,
+                    cumulativeAmount,
+                    deliverable,
+                    keccak256(optParams),
+                    auth.nonce,
+                    auth.deadline
+                )
+            ),
+            auth.sig
+        );
+        _settleClaim(auth.signer, jobId, cumulativeAmount, deliverable, optParams);
     }
 
     function approveClaimWithAuthorization(

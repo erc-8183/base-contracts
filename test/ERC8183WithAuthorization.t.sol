@@ -19,6 +19,9 @@ contract ERC8183WithAuthorizationTest is Test {
     bytes32 constant CREATE_JOB_AUTHORIZATION_TYPEHASH = keccak256(
         "CreateJobAuthorization(address signer,address provider,address evaluator,uint48 expiredAt,bytes32 descriptionHash,address hook,uint256 providerAgentId,uint72 nonce,uint256 deadline)"
     );
+    bytes32 constant SET_PROVIDER_AUTHORIZATION_TYPEHASH = keccak256(
+        "SetProviderAuthorization(address signer,uint256 jobId,address provider,uint256 agentId,uint72 nonce,uint256 deadline)"
+    );
     bytes32 constant SET_BUDGET_AUTHORIZATION_TYPEHASH = keccak256(
         "SetBudgetAuthorization(address signer,uint256 jobId,address token,uint256 amount,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
@@ -31,11 +34,20 @@ contract ERC8183WithAuthorizationTest is Test {
     bytes32 constant COMPLETE_AUTHORIZATION_TYPEHASH = keccak256(
         "CompleteAuthorization(address signer,uint256 jobId,bytes32 reason,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
+    bytes32 constant REJECT_AUTHORIZATION_TYPEHASH = keccak256(
+        "RejectAuthorization(address signer,uint256 jobId,bytes32 reason,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
+    );
     bytes32 constant SUBMIT_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
         "SubmitClaimAuthorization(address signer,uint256 jobId,uint256 cumulativeAmount,bytes32 deliverable,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
+    bytes32 constant SETTLE_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
+        "SettleClaimAuthorization(address signer,uint256 jobId,uint256 cumulativeAmount,bytes32 deliverable,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
+    );
     bytes32 constant APPROVE_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
         "ApproveClaimAuthorization(address signer,uint256 jobId,uint256 cumulativeAmount,bytes32 deliverable,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
+    );
+    bytes32 constant REJECT_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
+        "RejectClaimAuthorization(address signer,uint256 jobId,uint256 cumulativeAmount,bytes32 deliverable,bytes32 reason,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
 
     ERC8183WithAuthorization core;
@@ -54,9 +66,13 @@ contract ERC8183WithAuthorizationTest is Test {
     event ClaimSubmitted(
         uint256 indexed jobId, address indexed provider, uint256 cumulativeAmount, uint256 delta, bytes32 deliverable
     );
+    event ClaimSettled(
+        uint256 indexed jobId, address indexed settler, uint256 cumulativeAmount, uint256 delta, bytes32 deliverable
+    );
     event ClaimApproved(
         uint256 indexed jobId, address indexed approver, uint256 cumulativeAmount, uint256 delta, bytes32 deliverable
     );
+    event ClaimRejected(uint256 indexed jobId, address indexed rejector, bytes32 reason);
 
     function setUp() public {
         (client, clientPk) = makeAddrAndKey("client");
@@ -93,7 +109,7 @@ contract ERC8183WithAuthorizationTest is Test {
         return keccak256(
             abi.encode(
                 EIP712_DOMAIN_TYPEHASH,
-                keccak256(bytes("ERC8183WithAuthorization")),
+                keccak256(bytes("ERC8183")),
                 keccak256(bytes("1")),
                 block.chainid,
                 address(core)
@@ -109,6 +125,13 @@ contract ERC8183WithAuthorizationTest is Test {
 
     function _packNonce(address signer, uint72 nonce) internal pure returns (bytes32) {
         return bytes32((uint256(uint160(signer)) << 96) | uint256(nonce));
+    }
+
+    function _assertPublicTypehash(string memory signature, bytes32 expected) internal view {
+        (bool ok, bytes memory data) = address(core).staticcall(abi.encodeWithSignature(signature));
+
+        assertTrue(ok);
+        assertEq(abi.decode(data, (bytes32)), expected);
     }
 
     function _hashBytes(bytes memory value) internal pure returns (bytes32) {
@@ -180,6 +203,23 @@ contract ERC8183WithAuthorizationTest is Test {
                     nonce,
                     deadline
                 )
+            )
+        );
+    }
+
+    function _signSetProvider(
+        uint256 signerPk,
+        address signer,
+        uint256 jobId,
+        address provider_,
+        uint256 agentId,
+        uint72 nonce,
+        uint256 deadline
+    ) internal view returns (bytes memory) {
+        return _sign(
+            signerPk,
+            keccak256(
+                abi.encode(SET_PROVIDER_AUTHORIZATION_TYPEHASH, signer, jobId, provider_, agentId, nonce, deadline)
             )
         );
     }
@@ -268,6 +308,31 @@ contract ERC8183WithAuthorizationTest is Test {
         );
     }
 
+    function _signReject(
+        uint256 signerPk,
+        address signer,
+        uint256 jobId,
+        bytes32 reason,
+        bytes memory optParams,
+        uint72 nonce,
+        uint256 deadline
+    ) internal view returns (bytes memory) {
+        return _sign(
+            signerPk,
+            keccak256(
+                abi.encode(
+                    REJECT_AUTHORIZATION_TYPEHASH,
+                    signer,
+                    jobId,
+                    reason,
+                    _hashBytes(optParams),
+                    nonce,
+                    deadline
+                )
+            )
+        );
+    }
+
     function _signSubmitClaim(
         uint256 signerPk,
         address signer,
@@ -283,6 +348,33 @@ contract ERC8183WithAuthorizationTest is Test {
             keccak256(
                 abi.encode(
                     SUBMIT_CLAIM_AUTHORIZATION_TYPEHASH,
+                    signer,
+                    jobId,
+                    cumulativeAmount,
+                    deliverable,
+                    _hashBytes(optParams),
+                    nonce,
+                    deadline
+                )
+            )
+        );
+    }
+
+    function _signSettleClaim(
+        uint256 signerPk,
+        address signer,
+        uint256 jobId,
+        uint256 cumulativeAmount,
+        bytes32 deliverable,
+        bytes memory optParams,
+        uint72 nonce,
+        uint256 deadline
+    ) internal view returns (bytes memory) {
+        return _sign(
+            signerPk,
+            keccak256(
+                abi.encode(
+                    SETTLE_CLAIM_AUTHORIZATION_TYPEHASH,
                     signer,
                     jobId,
                     cumulativeAmount,
@@ -314,6 +406,35 @@ contract ERC8183WithAuthorizationTest is Test {
                     jobId,
                     cumulativeAmount,
                     deliverable,
+                    _hashBytes(optParams),
+                    nonce,
+                    deadline
+                )
+            )
+        );
+    }
+
+    function _signRejectClaim(
+        uint256 signerPk,
+        address signer,
+        uint256 jobId,
+        uint256 cumulativeAmount,
+        bytes32 deliverable,
+        bytes32 reason,
+        bytes memory optParams,
+        uint72 nonce,
+        uint256 deadline
+    ) internal view returns (bytes memory) {
+        return _sign(
+            signerPk,
+            keccak256(
+                abi.encode(
+                    REJECT_CLAIM_AUTHORIZATION_TYPEHASH,
+                    signer,
+                    jobId,
+                    cumulativeAmount,
+                    deliverable,
+                    reason,
                     _hashBytes(optParams),
                     nonce,
                     deadline
@@ -375,6 +496,47 @@ contract ERC8183WithAuthorizationTest is Test {
         core.completeWithAuthorization(jobId, reason, "", _auth(evaluator, nonce, deadline, sig));
     }
 
+    function test_domainSeparatorUsesERC8183ProtocolDomain() public view {
+        assertEq(core.DOMAIN_SEPARATOR(), _domainSeparator());
+    }
+
+    function test_claimAuthorizationTypehashesArePublic() public view {
+        _assertPublicTypehash("SET_PROVIDER_AUTHORIZATION_TYPEHASH()", SET_PROVIDER_AUTHORIZATION_TYPEHASH);
+        _assertPublicTypehash("REJECT_AUTHORIZATION_TYPEHASH()", REJECT_AUTHORIZATION_TYPEHASH);
+        _assertPublicTypehash("SUBMIT_CLAIM_AUTHORIZATION_TYPEHASH()", SUBMIT_CLAIM_AUTHORIZATION_TYPEHASH);
+        _assertPublicTypehash("SETTLE_CLAIM_AUTHORIZATION_TYPEHASH()", SETTLE_CLAIM_AUTHORIZATION_TYPEHASH);
+        _assertPublicTypehash("APPROVE_CLAIM_AUTHORIZATION_TYPEHASH()", APPROVE_CLAIM_AUTHORIZATION_TYPEHASH);
+        _assertPublicTypehash("REJECT_CLAIM_AUTHORIZATION_TYPEHASH()", REJECT_CLAIM_AUTHORIZATION_TYPEHASH);
+    }
+
+    function test_upgradeInitializerSetsERC8183DomainForAuthorizationExtension() public {
+        vm.startPrank(deployer);
+        ERC8183 baseImpl = new ERC8183();
+        ERC1967Proxy proxy =
+            new ERC1967Proxy(address(baseImpl), abi.encodeCall(ERC8183.initialize, (deployer, deployer)));
+        ERC8183 base = ERC8183(address(proxy));
+        base.setPaymentTokenAllowed(address(usdc), true);
+
+        ERC8183WithAuthorization authImpl = new ERC8183WithAuthorization();
+        base.upgradeToAndCall(
+            address(authImpl), abi.encodeCall(ERC8183WithAuthorization.initializeAuthorizationV2, ())
+        );
+        vm.stopPrank();
+
+        core = ERC8183WithAuthorization(address(proxy));
+        vm.prank(client);
+        usdc.approve(address(core), TWENTY_USDC);
+
+        assertEq(core.DOMAIN_SEPARATOR(), _domainSeparator());
+
+        uint256 deadline = _deadline();
+        uint256 jobId =
+            _relayCreateJob(client, clientPk, provider, evaluator, _futureExpiry(), "upgraded auth job", 51, deadline);
+
+        assertEq(core.getJob(jobId).client, client);
+        assertTrue(core.authorizationNonceUsed(_packNonce(client, 51)));
+    }
+
     function test_relaysFullSignedJobFlow() public {
         uint48 expiry = _futureExpiry();
         uint256 deadline = _deadline();
@@ -399,22 +561,56 @@ contract ERC8183WithAuthorizationTest is Test {
         assertEq(usdc.balanceOf(provider), TWENTY_USDC);
     }
 
-    function test_relaysClientAuthorizedNonzeroClaimIntoPendingStateAndApproval() public {
+    function test_relaysClientAuthorizedSetProvider() public {
+        vm.prank(client);
+        uint256 jobId = core.createJob(address(0), evaluator, _futureExpiry(), "late provider", address(0), 0);
+        uint256 deadline = _deadline();
+        uint256 agentId = 7;
+        bytes memory sig = _signSetProvider(clientPk, client, jobId, provider, agentId, 61, deadline);
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit AuthorizationUsed(client, _packNonce(client, 61));
+        vm.prank(relayer);
+        core.setProviderWithAuthorization(jobId, provider, agentId, _auth(client, 61, deadline, sig));
+
+        assertEq(core.getJob(jobId).provider, provider);
+        assertEq(core.getJob(jobId).providerAgentId, agentId);
+        assertTrue(core.authorizationNonceUsed(_packNonce(client, 61)));
+    }
+
+    function test_relaysEvaluatorAuthorizedReject() public {
+        uint256 jobId = _createFundedJob();
+        uint256 deadline = _deadline();
+        bytes32 reason = "rejected";
+        bytes memory sig = _signReject(evaluatorPk, evaluator, jobId, reason, "", 62, deadline);
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit AuthorizationUsed(evaluator, _packNonce(evaluator, 62));
+        vm.prank(relayer);
+        core.rejectWithAuthorization(jobId, reason, "", _auth(evaluator, 62, deadline, sig));
+
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Rejected));
+        assertEq(usdc.balanceOf(client), TWENTY_USDC);
+        assertEq(usdc.balanceOf(address(core)), 0);
+        assertTrue(core.authorizationNonceUsed(_packNonce(evaluator, 62)));
+    }
+
+    function test_relaysProviderAuthorizedClaimIntoPendingStateAndApproval() public {
         uint256 jobId = _createFundedJob();
         uint256 deadline = _deadline();
         bytes memory optParams = hex"1234";
         bytes32 deliverable = bytes32("milestone-1");
 
         bytes memory submitClaimSig =
-            _signSubmitClaim(clientPk, client, jobId, TEN_USDC, deliverable, optParams, 21, deadline);
+            _signSubmitClaim(providerPk, provider, jobId, TEN_USDC, deliverable, optParams, 21, deadline);
 
         vm.expectEmit(true, true, true, true, address(core));
-        emit AuthorizationUsed(client, _packNonce(client, 21));
+        emit AuthorizationUsed(provider, _packNonce(provider, 21));
         vm.expectEmit(true, true, true, true, address(core));
-        emit ClaimSubmitted(jobId, client, TEN_USDC, TEN_USDC, deliverable);
+        emit ClaimSubmitted(jobId, provider, TEN_USDC, TEN_USDC, deliverable);
         vm.prank(relayer);
         core.submitClaimWithAuthorization(
-            jobId, TEN_USDC, deliverable, optParams, _auth(client, 21, deadline, submitClaimSig)
+            jobId, TEN_USDC, deliverable, optParams, _auth(provider, 21, deadline, submitClaimSig)
         );
 
         assertEq(core.getJob(jobId).settledAmount, 0);
@@ -431,6 +627,53 @@ contract ERC8183WithAuthorizationTest is Test {
         vm.prank(relayer);
         core.approveClaimWithAuthorization(
             jobId, TEN_USDC, deliverable, optParams, _auth(evaluator, 22, deadline, approveClaimSig)
+        );
+
+        assertEq(core.getJob(jobId).settledAmount, TEN_USDC);
+        assertEq(core.pendingClaimHash(jobId), bytes32(0));
+        assertEq(usdc.balanceOf(provider), TEN_USDC);
+    }
+
+    function test_relaysProviderAuthorizedClaimRejectionClearsPendingState() public {
+        uint256 jobId = _createFundedJob();
+        uint256 deadline = _deadline();
+        bytes32 deliverable = bytes32("milestone-1");
+        bytes32 reason = bytes32("withdrawn");
+
+        bytes memory submitClaimSig = _signSubmitClaim(providerPk, provider, jobId, TEN_USDC, deliverable, "", 24, deadline);
+        vm.prank(relayer);
+        core.submitClaimWithAuthorization(jobId, TEN_USDC, deliverable, "", _auth(provider, 24, deadline, submitClaimSig));
+
+        bytes memory rejectClaimSig =
+            _signRejectClaim(providerPk, provider, jobId, TEN_USDC, deliverable, reason, "", 25, deadline);
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit AuthorizationUsed(provider, _packNonce(provider, 25));
+        vm.expectEmit(true, true, true, true, address(core));
+        emit ClaimRejected(jobId, provider, reason);
+        vm.prank(relayer);
+        core.rejectClaimWithAuthorization(
+            jobId, TEN_USDC, deliverable, reason, "", _auth(provider, 25, deadline, rejectClaimSig)
+        );
+
+        assertEq(core.pendingClaimHash(jobId), bytes32(0));
+    }
+
+    function test_relaysClientAuthorizedSettleClaimFastPath() public {
+        uint256 jobId = _createFundedJob();
+        uint256 deadline = _deadline();
+        bytes32 deliverable = bytes32(0);
+
+        bytes memory settleClaimSig =
+            _signSettleClaim(clientPk, client, jobId, TEN_USDC, deliverable, "", 23, deadline);
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit AuthorizationUsed(client, _packNonce(client, 23));
+        vm.expectEmit(true, true, true, true, address(core));
+        emit ClaimSettled(jobId, client, TEN_USDC, TEN_USDC, deliverable);
+        vm.prank(relayer);
+        core.settleClaimWithAuthorization(
+            jobId, TEN_USDC, deliverable, "", _auth(client, 23, deadline, settleClaimSig)
         );
 
         assertEq(core.getJob(jobId).settledAmount, TEN_USDC);
@@ -557,5 +800,39 @@ contract ERC8183WithAuthorizationTest is Test {
 
         assertTrue(core.authorizationNonceUsed(_packNonce(client, sharedNonce)));
         assertTrue(core.authorizationNonceUsed(_packNonce(provider, sharedNonce)));
+    }
+
+    function test_cancelAuthorizationBurnsSignerNonce() public {
+        uint48 expiry = _futureExpiry();
+        uint256 deadline = _deadline();
+        uint72 nonce = 63;
+        string memory description = "cancelled";
+        ERC8183WithAuthorization.CreateJobAuthorizationParams memory params =
+            _createParams(provider, evaluator, expiry, description, address(0), 0);
+        bytes memory sig = _signCreateJob(
+            clientPk, client, provider, evaluator, expiry, description, address(0), 0, nonce, deadline
+        );
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit AuthorizationUsed(client, _packNonce(client, nonce));
+        vm.prank(client);
+        core.cancelAuthorization(nonce);
+
+        assertTrue(core.authorizationNonceUsed(_packNonce(client, nonce)));
+
+        vm.expectRevert(ERC8183WithAuthorization.AuthorizationNonceUsed.selector);
+        vm.prank(relayer);
+        core.createJobWithAuthorization(params, _auth(client, nonce, deadline, sig));
+    }
+
+    function test_cancelAuthorizationRejectsUsedNonce() public {
+        uint72 nonce = 64;
+
+        vm.prank(client);
+        core.cancelAuthorization(nonce);
+
+        vm.expectRevert(ERC8183WithAuthorization.AuthorizationNonceUsed.selector);
+        vm.prank(client);
+        core.cancelAuthorization(nonce);
     }
 }

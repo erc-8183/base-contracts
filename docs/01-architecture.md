@@ -8,16 +8,17 @@ stateDiagram-v2
 
     Open --> Open: setBudget()\nsetProvider()
     Open --> Funded: fund()\n💰 budget escrowed
+    Open --> Submitted: submit(deliverable)\n[provider only, zero budget]
     Open --> Rejected: reject()\n[client or provider]
     Open --> Expired: claimRefund()\n[after expiry]\n(no escrow to refund)
 
     Funded --> Submitted: submit(deliverable)\n[provider only]
-    Funded --> Funded: submitClaim(bytes32(0))\n[client direct or client authorization]\n💸 delta released
-    Funded --> Funded: submitClaim(nonzero deliverable)\n[client direct or client authorization]\npending claim
+    Funded --> Funded: submitClaim()\n[provider direct or authorization]\npending claim
+    Funded --> Funded: settleClaim()\n[client direct or authorization]\n💸 delta released
     Funded --> Funded: approveClaim()\n[client/evaluator direct or authorization]\n💸 delta released
-    Funded --> Funded: rejectClaim()\n[client/evaluator direct or authorization]\npending cleared
+    Funded --> Funded: rejectClaim()\n[client/evaluator/provider direct or authorization]\npending cleared
     Funded --> Rejected: reject()\n[evaluator only]\n↩️ client refunded
-    Funded --> Expired: claimRefund()\n[after expiry]\n↩️ client refunded
+    Funded --> Expired: claimRefund()\n[after expiry]\n[no pending claim]\n↩️ client refunded
 
     Submitted --> Completed: complete(reason)\n[evaluator only]\n💸 provider paid
     Submitted --> Rejected: reject(reason)\n[evaluator only]\n↩️ client refunded
@@ -28,9 +29,13 @@ stateDiagram-v2
     Expired --> [*]
 ```
 
-`submitClaim` is an incremental settlement path while the job remains `Funded`. In the direct flow, the client sends the transaction, so no voucher signature is required. In the relayed flow, `ERC8183WithAuthorization.submitClaimWithAuthorization` carries the client's EIP-712 authorization signature for the same claim parameters. A zero deliverable releases the new delta immediately. A nonzero deliverable records a pending claim hash; the client or evaluator then approves or rejects it, directly or through `approveClaimWithAuthorization` / `rejectClaimWithAuthorization`.
+Claims have separate slow and fast paths while the job remains `Funded`. In the slow path, the provider calls `submitClaim` or signs `submitClaimWithAuthorization` before expiry to record a pending nonzero-deliverable claim. The client or evaluator then approves or rejects it, directly or through `approveClaimWithAuthorization` / `rejectClaimWithAuthorization`; the provider can also call or sign `rejectClaim` to withdraw their own pending claim. Rejected claim hashes remain consumed, so an identical claim cannot be filed again unless the provider changes `cumulativeAmount`, the deliverable, or `optParams`. In the fast path, the client calls `settleClaim` or signs `settleClaimWithAuthorization` before expiry to release the new cumulative delta immediately. The fast path is independent of pending milestone claims: streaming-style settlements can continue while a provider claim is pending, and they reduce the remaining delta payable if that claim is later approved. The pending claim itself remains open until `approveClaim`, `rejectClaim`, provider withdrawal, final `submit`, or terminal job rejection closes it. Both paths settle only `cumulativeAmount - settledAmount`, and both use the configured platform and evaluator fee split for that delta. The evaluator fee is part of the configured payment economics even for client-initiated fast settlements where no evaluator action occurs. If the provider later calls `submit` for the final deliverable, that submission supersedes any pending claim and clears it because the provider is requesting the full remaining escrow through the normal completion path. If the evaluator rejects the funded job while a claim is pending, that terminal job rejection also rejects and clears the pending claim with the job rejection reason.
 
-After expiry, `claimRefund` is callable by anyone. For `Submitted` jobs, it is gated by an additional `EVALUATION_GRACE_PERIOD` (1 hour) so that an evaluator who is mid-review cannot be censored by a third-party refund call. Refunds and final completion only use the unsettled escrow balance, so funds released by claims are not double-paid or double-refunded.
+After expiry, `claimRefund` is callable by anyone. For `Submitted` jobs, it is gated by an additional `EVALUATION_GRACE_PERIOD` (1 hour) so that an evaluator who is mid-review cannot be censored by a third-party refund call. A `Funded` job with a pending provider claim cannot be refunded until that claim is approved or rejected; this forces explicit resolution before the remaining escrow can be closed out. Providers cannot file new claims after expiry, but pending claims have no post-expiry approval/rejection deadline so authorized parties can still resolve them. If streaming settlements already moved `settledAmount` to or beyond the pending claim's cumulative amount, approving that claim reverts with `NoNewSettlement`; the claim must be rejected or withdrawn to close the lifecycle. If all parties stay idle, the remaining escrow stays parked until the client/evaluator rejects or approves the claim, or the provider withdraws it. Refunds, claim settlements, and final completion only use the unsettled escrow balance, so funds released by claims are not double-paid or double-refunded.
+
+For indexing, `Settled` is the generic cumulative accounting event emitted for every claim delta. `ClaimSubmitted`, `ClaimApproved`, `ClaimSettled`, and `ClaimRejected` describe the claim lifecycle path and any associated deliverable/reason. `PaymentReleased` is emitted only when a positive provider net transfer occurs.
+
+`ERC8183WithAuthorization` uses the same EIP-712 domain as the base protocol: name `ERC8183`, version `1`. The authorization contract extends ERC8183 entrypoints rather than creating a separate signing domain; upgraded proxies can call the admin-gated `initializeAuthorizationV2()` during `upgradeToAndCall` to initialize EIP-712 storage when the prior implementation did not already do so. Authorizations use packed `(signer, uint72 nonce)` replay protection. A signer can directly call `cancelAuthorization(nonce)` to burn one of their own outstanding nonces; this function is not relayed and is deliberately callable while paused so users can revoke signed messages during an incident.
 
 ## Sequence — Typical Job Flow (No Hook)
 
@@ -62,20 +67,23 @@ sequenceDiagram
 sequenceDiagram
     participant C as Client
     participant AC as ERC8183
+    participant P as Provider
     participant E as Evaluator
 
     Note over AC: Status: Funded
-    C->>AC: submitClaim(jobId, cumulativeAmount, deliverable, optParams)
 
-    alt deliverable == bytes32(0)
-        Note over AC: 💸 delta released
-    else deliverable != bytes32(0)
+    alt Slow path: provider claim request
+        P->>AC: submitClaim(jobId, cumulativeAmount, deliverable, optParams)
         Note over AC: pending claim hash stored
-        E->>AC: approveClaim(jobId, cumulativeAmount, deliverable, optParams)
+        C->>AC: approveClaim(jobId, cumulativeAmount, deliverable, optParams)
         Note over AC: 💸 delta released
+    else Fast path: client-authorized settlement
+        C->>AC: settleClaim(jobId, cumulativeAmount, deliverable, optParams)
+        Note over AC: 💸 delta released immediately
     end
 
-    Note over C,AC: Relayed variant: client signs SubmitClaimAuthorization,<br/>relayer calls submitClaimWithAuthorization(...)
+    Note over C,AC: Relayed fast path: client signs SettleClaimAuthorization,<br/>relayer calls settleClaimWithAuthorization(...)
+    Note over P,AC: Relayed slow path: provider signs SubmitClaimAuthorization,<br/>relayer calls submitClaimWithAuthorization(...)
 ```
 
 ## Sequence — Job with Hook

@@ -31,6 +31,7 @@ interface IERC8183Hook is IERC165 {
 | `fund`        | Yes     | before + after |
 | `submit`      | Yes     | before + after |
 | `submitClaim` | Yes     | before + after |
+| `settleClaim` | Yes     | before + after |
 | `approveClaim` | Yes   | before + after |
 | `rejectClaim` | Yes    | before + after |
 | `complete`    | Yes     | before + after |
@@ -47,6 +48,7 @@ As produced by `ERC8183`:
 | `fund`      | `abi.encode(address caller, bytes optParams)`                                |
 | `submit`    | `abi.encode(address caller, bytes32 deliverable, bytes optParams)`           |
 | `submitClaim` | `abi.encode(address caller, uint256 cumulativeAmount, bytes32 deliverable, bytes optParams)` |
+| `settleClaim` | `abi.encode(address caller, uint256 cumulativeAmount, bytes32 deliverable, bytes optParams)` |
 | `approveClaim` | `abi.encode(address caller, uint256 cumulativeAmount, bytes32 deliverable, bytes optParams)` |
 | `rejectClaim` | `abi.encode(address caller, uint256 cumulativeAmount, bytes32 deliverable, bytes32 reason, bytes optParams)` |
 | `complete`  | `abi.encode(address caller, bytes32 reason, bytes optParams)`                |
@@ -76,7 +78,7 @@ function setHookWhitelist(address hook, bool status) external onlyRole(ADMIN_ROL
 Whitelist membership has two effects:
 
 1. The hook may be set on new jobs (checked in `createJob`).
-2. The hook can call `beforeAction` / `afterAction` on other whitelisted hooks (typically enforced via a `BaseACPHook.onlyACP` modifier on hook implementations). This enables routers that fan out to sub-hooks, but it also means every whitelisted address gains cross-invocation power over all other hooks. Only whitelist contracts you fully trust and have audited.
+2. Hook implementations may choose to trust whitelisted addresses as cross-hook callers. This enables routers that fan out to sub-hooks, but it also means every whitelisted address can gain cross-invocation power if hooks opt into that trust model. Only whitelist contracts you fully trust and have audited.
 
 In addition, `createJob` calls `ERC165Checker.supportsInterface(hook, type(IERC8183Hook).interfaceId)` for non-zero hooks; a hook that does not advertise support for the interface is rejected with `InvalidHook`.
 
@@ -120,7 +122,7 @@ function fund(
     // ... validation (status, caller, expiry, expectedBudget == budget) ...
 
     bytes memory data = abi.encode(msg.sender, optParams);
-    _beforeHook(job.hook, jobId, msg.sig, data);   // CAN revert to gate the transition
+    _beforeHook(job.hook, jobId, this.fund.selector, data);   // CAN revert to gate the transition
 
     job.status = JobStatus.Funded;
     if (job.budget > 0) {
@@ -134,9 +136,11 @@ function fund(
     }
     emit JobFunded(jobId, job.client, job.budget);
 
-    _afterHook(job.hook, jobId, msg.sig, data);    // for bookkeeping / side effects
+    _afterHook(job.hook, jobId, this.fund.selector, data);    // for bookkeeping / side effects
 }
 ```
+
+The core passes canonical base-function selectors such as `this.fund.selector`, including when a relayed `*WithAuthorization` wrapper calls the same internal transition.
 
 ## Hook Safety
 
@@ -144,5 +148,9 @@ function fund(
 - Hooks MUST NOT be able to change job state outside of defined transitions — they observe and gate, they do not write to `jobs[jobId]`.
 - `beforeAction` can revert to gate transitions — this is intentional and by design.
 - `afterAction` reverts roll back the whole transaction — hook state must stay consistent with core state.
-- `claimRefund` is intentionally not hookable — refunds cannot be blocked or delayed by hook logic.
+- `claimRefund` is intentionally not hookable, but it still requires pending provider claims to be resolved first.
+- `settleClaim` can run while a provider claim is pending; it updates cumulative settlement but does not close the pending claim lifecycle.
+- `approveClaim` and `rejectClaim` are hookable resolution actions; trusted hooks can gate them like other business transitions.
+- When `submit` supersedes a pending claim, the pending claim is cleared before submit hooks run so hooks observe the post-supersede state.
 - A `Submitted` job cannot be force-refunded for `EVALUATION_GRACE_PERIOD` (1 hour) past `expiredAt`, giving the evaluator a censorship-resistant window to call `complete` or `reject`.
+- A `Funded` job with a pending provider claim cannot be force-refunded until the claim is approved or rejected; if all parties stay idle, escrow remains parked.

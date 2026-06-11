@@ -2,13 +2,43 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
+import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 
 import {ERC8183} from "../contracts/ERC8183.sol";
+import {IERC8183Hook} from "../contracts/IERC8183Hook.sol";
 import {MockUSDC} from "../contracts/mocks/MockUSDC.sol";
 import {MockCBBTC} from "../contracts/mocks/MockCBBTC.sol";
 import {MockFeeOnTransferToken} from "../contracts/mocks/MockFeeOnTransferToken.sol";
+
+contract PendingClaimObserverHook is IERC8183Hook {
+    ERC8183 immutable core;
+
+    bytes32 public beforeSubmitPendingClaimHash;
+    bytes32 public afterSubmitPendingClaimHash;
+
+    constructor(ERC8183 core_) {
+        core = core_;
+    }
+
+    function beforeAction(uint256 jobId, bytes4 selector, bytes calldata) external override {
+        if (selector == ERC8183.submit.selector) {
+            beforeSubmitPendingClaimHash = core.pendingClaimHash(jobId);
+        }
+    }
+
+    function afterAction(uint256 jobId, bytes4 selector, bytes calldata) external override {
+        if (selector == ERC8183.submit.selector) {
+            afterSubmitPendingClaimHash = core.pendingClaimHash(jobId);
+        }
+    }
+
+    function supportsInterface(bytes4 interfaceId) external pure override returns (bool) {
+        return interfaceId == type(IERC8183Hook).interfaceId || interfaceId == type(IERC165).interfaceId;
+    }
+}
 
 /// @notice Image Generation — E2E flow (no hook, core-only payment).
 ///         Mirrors the original Hardhat suite in test/ERC8183.test.js.
@@ -38,9 +68,13 @@ contract ERC8183Test is Test {
     event ClaimSubmitted(
         uint256 indexed jobId, address indexed provider, uint256 cumulativeAmount, uint256 delta, bytes32 deliverable
     );
+    event ClaimSettled(
+        uint256 indexed jobId, address indexed settler, uint256 cumulativeAmount, uint256 delta, bytes32 deliverable
+    );
     event ClaimApproved(
         uint256 indexed jobId, address indexed approver, uint256 cumulativeAmount, uint256 delta, bytes32 deliverable
     );
+    event ClaimRejected(uint256 indexed jobId, address indexed rejector, bytes32 reason);
 
     function setUp() public {
         vm.startPrank(deployer);
@@ -81,6 +115,14 @@ contract ERC8183Test is Test {
         returns (bytes32)
     {
         return keccak256(abi.encode(amount, deliverable, keccak256(optParams)));
+    }
+
+    function _hasPaymentReleasedLog(Vm.Log[] memory entries) internal pure returns (bool) {
+        bytes32 topic = keccak256("PaymentReleased(uint256,address,uint256)");
+        for (uint256 i = 0; i < entries.length; i++) {
+            if (entries[i].topics.length > 0 && entries[i].topics[0] == topic) return true;
+        }
+        return false;
     }
 
     // ──────────────────────────────────────────────────────────
@@ -394,26 +436,42 @@ contract ERC8183Test is Test {
         assertEq(usdc.balanceOf(client), TWENTY_USDC);
     }
 
-    function test_claims_ClientDirectlySubmitsZeroDeliverableClaimWithoutVoucherSignature() public {
+    function test_claims_ClientSettleClaimFastPathReleasesDelta() public {
         uint256 jobId = _createFundedJob(TWENTY_USDC);
 
         vm.expectRevert(ERC8183.Unauthorized.selector);
         vm.prank(provider);
-        core.submitClaim(jobId, TEN_USDC, EMPTY_DELIVERABLE, "");
+        core.settleClaim(jobId, TEN_USDC, EMPTY_DELIVERABLE, "");
 
         vm.expectEmit(true, true, true, true, address(core));
         emit PaymentReleased(jobId, provider, TEN_USDC);
         vm.expectEmit(true, true, true, true, address(core));
         emit Settled(jobId, TEN_USDC, TEN_USDC);
         vm.expectEmit(true, true, true, true, address(core));
-        emit ClaimSubmitted(jobId, client, TEN_USDC, TEN_USDC, EMPTY_DELIVERABLE);
+        emit ClaimSettled(jobId, client, TEN_USDC, TEN_USDC, EMPTY_DELIVERABLE);
         vm.prank(client);
-        core.submitClaim(jobId, TEN_USDC, EMPTY_DELIVERABLE, "");
+        core.settleClaim(jobId, TEN_USDC, EMPTY_DELIVERABLE, "");
 
         assertEq(core.getJob(jobId).settledAmount, TEN_USDC);
         assertEq(core.pendingClaimHash(jobId), bytes32(0));
         assertEq(usdc.balanceOf(provider), TEN_USDC);
         assertEq(usdc.balanceOf(address(core)), TEN_USDC);
+    }
+
+    function test_claims_SettleClaimSkipsPaymentReleasedWhenNetZero() public {
+        uint256 jobId = _createFundedJob(TWENTY_USDC);
+
+        vm.prank(deployer);
+        core.setEvaluatorFee(10_000);
+
+        vm.recordLogs();
+        vm.prank(client);
+        core.settleClaim(jobId, TEN_USDC, EMPTY_DELIVERABLE, "");
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+
+        assertFalse(_hasPaymentReleasedLog(entries));
+        assertEq(usdc.balanceOf(evaluator), TEN_USDC);
+        assertEq(usdc.balanceOf(provider), 0);
     }
 
     function test_claims_NonzeroDeliverableRecordsPendingHashAndSettlesOnApproval() public {
@@ -422,12 +480,12 @@ contract ERC8183Test is Test {
         bytes memory optParams = hex"1234";
 
         vm.expectRevert(ERC8183.Unauthorized.selector);
-        vm.prank(provider);
+        vm.prank(client);
         core.submitClaim(jobId, TEN_USDC, deliverable, optParams);
 
         vm.expectEmit(true, true, true, true, address(core));
-        emit ClaimSubmitted(jobId, client, TEN_USDC, TEN_USDC, deliverable);
-        vm.prank(client);
+        emit ClaimSubmitted(jobId, provider, TEN_USDC, TEN_USDC, deliverable);
+        vm.prank(provider);
         core.submitClaim(jobId, TEN_USDC, deliverable, optParams);
 
         assertEq(core.getJob(jobId).settledAmount, 0);
@@ -448,5 +506,280 @@ contract ERC8183Test is Test {
         assertEq(core.pendingClaimHash(jobId), bytes32(0));
         assertEq(usdc.balanceOf(provider), TEN_USDC);
         assertEq(usdc.balanceOf(address(core)), TEN_USDC);
+    }
+
+    function test_claims_SubmitClaimRejectsZeroDeliverableAndPendingOverwrite() public {
+        uint256 jobId = _createFundedJob(TWENTY_USDC);
+        bytes32 deliverable = bytes32("milestone-1");
+
+        vm.expectRevert(ERC8183.EmptyDeliverable.selector);
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, EMPTY_DELIVERABLE, "");
+
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, deliverable, "");
+
+        vm.expectRevert(ERC8183.PendingClaimExists.selector);
+        vm.prank(provider);
+        core.submitClaim(jobId, TWENTY_USDC, bytes32("milestone-2"), "");
+    }
+
+    function test_claims_SubmitClaimRevertsAtExpiry() public {
+        uint48 expiry = _futureExpiry();
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, expiry, "expired claim", address(0), 0);
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, TWENTY_USDC, "");
+
+        vm.warp(expiry);
+
+        bytes32 deliverable = "milestone-1";
+        vm.expectRevert(ERC8183.WrongStatus.selector);
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, deliverable, "");
+    }
+
+    function test_claims_SettleClaimRevertsAtExpiry() public {
+        uint48 expiry = _futureExpiry();
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, expiry, "expired settlement", address(0), 0);
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, TWENTY_USDC, "");
+
+        vm.warp(expiry);
+
+        vm.expectRevert(ERC8183.WrongStatus.selector);
+        vm.prank(client);
+        core.settleClaim(jobId, TEN_USDC, EMPTY_DELIVERABLE, "");
+    }
+
+    function test_claims_SettleClaimContinuesWhilePendingClaimExists() public {
+        uint256 jobId = _createFundedJob(TWENTY_USDC);
+        bytes32 deliverable = bytes32("milestone-1");
+
+        vm.prank(provider);
+        core.submitClaim(jobId, TWENTY_USDC, deliverable, "");
+        assertEq(core.pendingClaimHash(jobId), _claimBindingHash(TWENTY_USDC, deliverable, ""));
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit PaymentReleased(jobId, provider, TEN_USDC);
+        vm.expectEmit(true, true, true, true, address(core));
+        emit Settled(jobId, TEN_USDC, TEN_USDC);
+        vm.expectEmit(true, true, true, true, address(core));
+        emit ClaimSettled(jobId, client, TEN_USDC, TEN_USDC, deliverable);
+        vm.prank(client);
+        core.settleClaim(jobId, TEN_USDC, deliverable, "");
+
+        assertEq(core.getJob(jobId).settledAmount, TEN_USDC);
+        assertEq(core.pendingClaimHash(jobId), _claimBindingHash(TWENTY_USDC, deliverable, ""));
+        assertEq(usdc.balanceOf(provider), TEN_USDC);
+        assertEq(usdc.balanceOf(address(core)), TEN_USDC);
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit PaymentReleased(jobId, provider, TEN_USDC);
+        vm.expectEmit(true, true, true, true, address(core));
+        emit Settled(jobId, TWENTY_USDC, TEN_USDC);
+        vm.expectEmit(true, true, true, true, address(core));
+        emit ClaimApproved(jobId, evaluator, TWENTY_USDC, TEN_USDC, deliverable);
+        vm.prank(evaluator);
+        core.approveClaim(jobId, TWENTY_USDC, deliverable, "");
+
+        assertEq(core.getJob(jobId).settledAmount, TWENTY_USDC);
+        assertEq(core.pendingClaimHash(jobId), bytes32(0));
+        assertEq(usdc.balanceOf(provider), TWENTY_USDC);
+        assertEq(usdc.balanceOf(address(core)), 0);
+    }
+
+    function test_claims_DeadPendingClaimCanBeRejectedThenRefunded() public {
+        uint48 expiry = _futureExpiry();
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, expiry, "dead claim", address(0), 0);
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, TWENTY_USDC, "");
+
+        bytes32 deliverable = "milestone-1";
+        bytes32 streamDeliverable = "stream";
+        bytes32 staleReason = "stale";
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, deliverable, "");
+
+        vm.prank(client);
+        core.settleClaim(jobId, TEN_USDC, streamDeliverable, "");
+
+        vm.expectRevert(ERC8183.NoNewSettlement.selector);
+        vm.prank(evaluator);
+        core.approveClaim(jobId, TEN_USDC, deliverable, "");
+
+        vm.warp(uint256(expiry) + 1);
+        vm.expectRevert(ERC8183.PendingClaimExists.selector);
+        core.claimRefund(jobId);
+
+        vm.prank(client);
+        core.rejectClaim(jobId, TEN_USDC, deliverable, staleReason, "");
+
+        core.claimRefund(jobId);
+
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Expired));
+        assertEq(core.pendingClaimHash(jobId), bytes32(0));
+        assertEq(usdc.balanceOf(provider), TEN_USDC);
+        assertEq(usdc.balanceOf(client), TEN_USDC);
+        assertEq(usdc.balanceOf(address(core)), 0);
+    }
+
+    function test_claims_SubmitClearsPendingClaimAndCompletesFullEscrow() public {
+        uint256 jobId = _createFundedJob(TWENTY_USDC);
+        bytes32 claimDeliverable = bytes32("milestone-1");
+        bytes32 supersededReason = bytes32("superseded-by-submit");
+
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, claimDeliverable, "");
+        assertEq(core.pendingClaimHash(jobId), _claimBindingHash(TEN_USDC, claimDeliverable, ""));
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit ClaimRejected(jobId, provider, supersededReason);
+        vm.prank(provider);
+        core.submit(jobId, bytes32("final"), "");
+
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Submitted));
+        assertEq(core.pendingClaimHash(jobId), bytes32(0));
+
+        vm.prank(evaluator);
+        core.complete(jobId, bytes32("ok"), "");
+
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Completed));
+        assertEq(core.getJob(jobId).settledAmount, 0);
+        assertEq(usdc.balanceOf(provider), TWENTY_USDC);
+        assertEq(usdc.balanceOf(address(core)), 0);
+    }
+
+    function test_claims_SubmitClearsPendingClaimBeforeHook() public {
+        PendingClaimObserverHook hook = new PendingClaimObserverHook(core);
+        vm.prank(deployer);
+        core.setHookWhitelist(address(hook), true);
+
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, _futureExpiry(), "hooked claim job", address(hook), 0);
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, TWENTY_USDC, "");
+
+        bytes32 claimDeliverable = bytes32("milestone-1");
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, claimDeliverable, "");
+        assertEq(core.pendingClaimHash(jobId), _claimBindingHash(TEN_USDC, claimDeliverable, ""));
+
+        vm.prank(provider);
+        core.submit(jobId, bytes32("final"), "");
+
+        assertEq(hook.beforeSubmitPendingClaimHash(), bytes32(0));
+        assertEq(hook.afterSubmitPendingClaimHash(), bytes32(0));
+    }
+
+    function test_claims_RejectFundedJobClearsPendingClaim() public {
+        uint256 jobId = _createFundedJob(TWENTY_USDC);
+        bytes32 deliverable = bytes32("milestone-1");
+        bytes32 reason = bytes32("job-rejected");
+
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, deliverable, "");
+        assertEq(core.pendingClaimHash(jobId), _claimBindingHash(TEN_USDC, deliverable, ""));
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit ClaimRejected(jobId, evaluator, reason);
+        vm.prank(evaluator);
+        core.reject(jobId, reason, "");
+
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Rejected));
+        assertEq(core.pendingClaimHash(jobId), bytes32(0));
+        assertEq(usdc.balanceOf(client), TWENTY_USDC);
+        assertEq(usdc.balanceOf(provider), 0);
+        assertEq(usdc.balanceOf(address(core)), 0);
+    }
+
+    function test_claims_ProviderCanRejectOwnPendingClaimAndSubmitNewClaim() public {
+        uint256 jobId = _createFundedJob(TWENTY_USDC);
+        bytes32 deliverable = bytes32("milestone-1");
+        bytes32 reason = bytes32("withdrawn");
+
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, deliverable, "");
+
+        vm.expectEmit(true, true, true, true, address(core));
+        emit ClaimRejected(jobId, provider, reason);
+        vm.prank(provider);
+        core.rejectClaim(jobId, TEN_USDC, deliverable, reason, "");
+
+        assertEq(core.pendingClaimHash(jobId), bytes32(0));
+
+        vm.expectRevert(ERC8183.ClaimAlreadySubmitted.selector);
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, deliverable, "");
+
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, bytes32("milestone-2"), "");
+
+        assertEq(core.pendingClaimHash(jobId), _claimBindingHash(TEN_USDC, bytes32("milestone-2"), ""));
+    }
+
+    function test_claims_PendingClaimBlocksRefundUntilResolved() public {
+        uint48 expiry = _futureExpiry();
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, expiry, "pending claim block", address(0), 0);
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, TWENTY_USDC, "");
+
+        bytes32 deliverable = bytes32("milestone-1");
+        vm.warp(uint256(expiry) - 1);
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, deliverable, "");
+
+        vm.warp(uint256(expiry) + 30 days);
+        vm.expectRevert(ERC8183.PendingClaimExists.selector);
+        core.claimRefund(jobId);
+
+        vm.prank(evaluator);
+        core.approveClaim(jobId, TEN_USDC, deliverable, "");
+
+        assertEq(core.getJob(jobId).settledAmount, TEN_USDC);
+        assertEq(core.pendingClaimHash(jobId), bytes32(0));
+        assertEq(usdc.balanceOf(provider), TEN_USDC);
+        assertEq(usdc.balanceOf(address(core)), TEN_USDC);
+    }
+
+    function test_claims_RejectPendingClaimAfterExpiryThenRefundsRemainingEscrow() public {
+        uint48 expiry = _futureExpiry();
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, expiry, "pending claim reject", address(0), 0);
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, TWENTY_USDC, "");
+
+        bytes32 deliverable = bytes32("milestone-1");
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, deliverable, "");
+
+        vm.warp(uint256(expiry) + 30 days);
+        vm.expectRevert(ERC8183.PendingClaimExists.selector);
+        core.claimRefund(jobId);
+
+        vm.prank(provider);
+        core.rejectClaim(jobId, TEN_USDC, deliverable, bytes32("withdrawn"), "");
+
+        core.claimRefund(jobId);
+
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Expired));
+        assertEq(core.pendingClaimHash(jobId), bytes32(0));
+        assertEq(usdc.balanceOf(client), TWENTY_USDC);
+        assertEq(usdc.balanceOf(address(core)), 0);
     }
 }

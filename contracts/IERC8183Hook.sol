@@ -17,20 +17,19 @@ import "@openzeppelin/contracts/utils/introspection/IERC165.sol";
  *      stable as the core protocol evolves — new hookable functions simply produce
  *      new selector values without changing this interface.
  *
- *      For convenience, inherit from BaseERC8183Hook which routes selectors to named
- *      virtual functions (e.g. _preFund, _postComplete) so you only override
- *      what you need.
+ *      Implementations can route selectors to named internal handlers and decode
+ *      `data` according to the hook encoding documented for each selector.
  */
 interface IERC8183Hook is IERC165 {
     /// @dev Called before the core function executes. MAY revert to block the action.
     /// @param jobId The job ID.
     /// @param selector The function selector of the core function being called.
-    /// @param data Encoded function-specific parameters (see BaseERC8183Hook for decoding).
+    /// @param data Encoded function-specific parameters (see protocol documentation for decoding).
     function beforeAction(uint256 jobId, bytes4 selector, bytes calldata data) external;
 
     /// @dev Called after the core function completes. MAY revert to roll back the transaction.
     /// @param jobId The job ID.
     /// @param selector The function selector of the core function being called.
-    /// @param data Encoded function-specific parameters (see BaseERC8183Hook for decoding).
+    /// @param data Encoded function-specific parameters (see protocol documentation for decoding).
     function afterAction(uint256 jobId, bytes4 selector, bytes calldata data) external;
 }
