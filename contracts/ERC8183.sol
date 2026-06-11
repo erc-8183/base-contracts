@@ -83,7 +83,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
 
     /// @notice Job ID -> Job data
     mapping(uint256 => Job) public jobs;
-    /// @notice Motonically increasing job ID counter
+    /// @notice Monotonically increasing job ID counter
     uint256 public jobCounter;
     /// @notice Hook address -> whether it is whitelisted for use
     mapping(address => bool) public whitelistedHooks;
@@ -441,7 +441,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     // ──────────────────── Job Lifecycle ────────────────────
 
     /// @notice Creates a new job. Client is msg.sender.
-    //// @param provider Service provider (can be address(0) to assign later via setProvider)
+    /// @param provider Service provider (can be address(0) to assign later via setProvider)
     /// @param evaluator Third-party attestor (cannot be address(0))
     /// @param expiredAt Unix timestamp when the job expires (must be > 5 min from now)
     /// @param description Human-readable job description
@@ -472,7 +472,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         if (expiredAt <= block.timestamp + 5 minutes) revert ExpiryTooShort();
         if (client == provider) revert ClientCannotBeProvider();
         if (evaluator == address(0)) revert ZeroAddress();
-        if (evaluator != address(0) && evaluator == provider) revert ProviderCannotBeEvaluator();
+        if (evaluator == provider) revert ProviderCannotBeEvaluator();
         if (!whitelistedHooks[hook]) revert HookNotWhitelisted();
         if (hook != address(0)) {
             if (
@@ -653,6 +653,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         _beforeHook(job.hook, jobId, this.submit.selector, data);
 
         job.status = JobStatus.Submitted;
+        // forge-lint: disable-next-line(unsafe-typecast)
         job.submittedAt = uint48(block.timestamp);
         emit JobSubmitted(jobId, actor, deliverable);
 

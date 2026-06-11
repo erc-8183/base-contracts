@@ -81,6 +81,15 @@ contract ERC8183WithAuthorization is ERC8183 {
         return _domainSeparatorV4();
     }
 
+    /// @notice Burns one of msg.sender's authorization nonces so a signed authorization cannot be relayed later.
+    /// @dev This is intentionally not relayed: only the signer can nullify their own outstanding authorization.
+    function cancelAuthorization(uint72 nonce) external nonReentrant {
+        bytes32 packedNonce = _packAuthorizationNonce(msg.sender, nonce);
+        if (authorizationNonceUsed[packedNonce]) revert AuthorizationNonceUsed();
+        authorizationNonceUsed[packedNonce] = true;
+        emit AuthorizationUsed(msg.sender, packedNonce);
+    }
+
     function createJobWithAuthorization(
         CreateJobAuthorizationParams calldata params,
         Authorization calldata auth

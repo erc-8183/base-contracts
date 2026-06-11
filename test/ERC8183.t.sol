@@ -524,6 +524,39 @@ contract ERC8183Test is Test {
         core.submitClaim(jobId, TWENTY_USDC, bytes32("milestone-2"), "");
     }
 
+    function test_claims_SubmitClaimRevertsAtExpiry() public {
+        uint48 expiry = _futureExpiry();
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, expiry, "expired claim", address(0), 0);
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, TWENTY_USDC, "");
+
+        vm.warp(expiry);
+
+        bytes32 deliverable = "milestone-1";
+        vm.expectRevert(ERC8183.WrongStatus.selector);
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, deliverable, "");
+    }
+
+    function test_claims_SettleClaimRevertsAtExpiry() public {
+        uint48 expiry = _futureExpiry();
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, expiry, "expired settlement", address(0), 0);
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, TWENTY_USDC, "");
+
+        vm.warp(expiry);
+
+        vm.expectRevert(ERC8183.WrongStatus.selector);
+        vm.prank(client);
+        core.settleClaim(jobId, TEN_USDC, EMPTY_DELIVERABLE, "");
+    }
+
     function test_claims_SettleClaimContinuesWhilePendingClaimExists() public {
         uint256 jobId = _createFundedJob(TWENTY_USDC);
         bytes32 deliverable = bytes32("milestone-1");
@@ -558,6 +591,44 @@ contract ERC8183Test is Test {
         assertEq(core.getJob(jobId).settledAmount, TWENTY_USDC);
         assertEq(core.pendingClaimHash(jobId), bytes32(0));
         assertEq(usdc.balanceOf(provider), TWENTY_USDC);
+        assertEq(usdc.balanceOf(address(core)), 0);
+    }
+
+    function test_claims_DeadPendingClaimCanBeRejectedThenRefunded() public {
+        uint48 expiry = _futureExpiry();
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, expiry, "dead claim", address(0), 0);
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, TWENTY_USDC, "");
+
+        bytes32 deliverable = "milestone-1";
+        bytes32 streamDeliverable = "stream";
+        bytes32 staleReason = "stale";
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, deliverable, "");
+
+        vm.prank(client);
+        core.settleClaim(jobId, TEN_USDC, streamDeliverable, "");
+
+        vm.expectRevert(ERC8183.NoNewSettlement.selector);
+        vm.prank(evaluator);
+        core.approveClaim(jobId, TEN_USDC, deliverable, "");
+
+        vm.warp(uint256(expiry) + 1);
+        vm.expectRevert(ERC8183.PendingClaimExists.selector);
+        core.claimRefund(jobId);
+
+        vm.prank(client);
+        core.rejectClaim(jobId, TEN_USDC, deliverable, staleReason, "");
+
+        core.claimRefund(jobId);
+
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Expired));
+        assertEq(core.pendingClaimHash(jobId), bytes32(0));
+        assertEq(usdc.balanceOf(provider), TEN_USDC);
+        assertEq(usdc.balanceOf(client), TEN_USDC);
         assertEq(usdc.balanceOf(address(core)), 0);
     }
 
