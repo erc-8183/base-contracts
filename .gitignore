@@ -17,6 +17,7 @@ lcov.info
 # IDE
 .idea/
 .vscode/
+worktrees/
 *.swp
 *.swo
 
