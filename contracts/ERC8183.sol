@@ -38,7 +38,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         Expired
     }
 
-    /// @notice Core job data, packed into 8 storage slots
+    /// @notice Core job data; static fields occupy 9 storage slots, plus dynamic description storage
     /// @param client           Job creator who funds the escrow
     /// @param status           Current lifecycle state
     /// @param provider         Service provider who delivers work
@@ -146,19 +146,19 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     event JobExpired(
         uint256 indexed jobId
     );
-    /// @notice Emitted when the provider's net payment is released on completion
+    /// @notice Emitted when the provider's net payment is released
     event PaymentReleased(
         uint256 indexed jobId,
         address indexed provider,
         uint256 amount
     );
-    /// @notice Emitted when the platform fee gets distributed on completion
+    /// @notice Emitted when the platform fee gets distributed
     event PlatformFeePaid(
         uint256 indexed jobId,
         address indexed platformTreasury,
         uint256 amount
     );
-    /// @notice Emitted when the evaluator fee is distributed on completion
+    /// @notice Emitted when the evaluator fee is distributed
     event EvaluatorFeePaid(
         uint256 indexed jobId,
         address indexed evaluator,
@@ -263,7 +263,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     error ProviderCannotBeEvaluator();
     /// @notice Thrown when the client and provider are the same address
     error ClientCannotBeProvider();
-    /// @notice Thrown when the job is expired with SUBMITTED status but block.timestamp < job.submittedAt + EVALUATION_GRACE_PERIOD
+    /// @notice Thrown when a Submitted job is within the post-expiry evaluator grace period
     error GracePeriodActive();
     /// @notice Thrown when the payment token is not on the allowlist
     error PaymentTokenNotAllowed();
@@ -277,7 +277,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     error ClaimAlreadySubmitted();
     /// @notice Thrown when submitting a provider claim without a deliverable
     error EmptyDeliverable();
-    /// @notice Thrown when submitting or settling while another claim is pending
+    /// @notice Thrown when submitting a provider claim or refunding while another claim is pending
     error PendingClaimExists();
     /// @notice Thrown when approveClaim/rejectClaim is called with no matching pending claim
     error NoPendingClaim();
@@ -364,11 +364,11 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     /// @notice Whitelist or remove a hook contract
     /// @dev    Whitelisted addresses serve two roles:
     ///         1. They can be set as the hook on new jobs (checked in createJob).
-    ///         2. They can call beforeAction/afterAction on OTHER whitelisted hooks
-    ///            (checked in BaseACPHook.onlyACP). This enables routers that
-    ///            fan out to sub-hooks, but it also means every whitelisted address
-    ///            gains cross-invocation power over all other hooks. Only whitelist
-    ///            contracts you fully trust and have audited.
+    ///         2. Hook implementations may choose to trust whitelisted addresses
+    ///            as cross-hook callers. This enables routers that fan out to
+    ///            sub-hooks, but it also means every whitelisted address can gain
+    ///            cross-invocation power if hooks opt into that trust model. Only
+    ///            whitelist contracts you fully trust and have audited.
     /// @param hook The hook contract address
     /// @param status True to whitelist, false to remove
     function setHookWhitelist(
@@ -774,7 +774,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
 
     /// @notice Claims a refund for an expired job. Anyone can call.
     ///         Transitions Open/Funded/Submitted -> Expired after expiry time.
-    ///         Not hookable -- funds are always recoverable regardless of hook behavior.
+    ///         Not hookable; pending claims must still be resolved before refund.
     /// @param jobId The expired job to claim refund for
     function claimRefund(uint256 jobId) external whenNotPaused nonReentrant {
         Job storage job = jobs[jobId];

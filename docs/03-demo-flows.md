@@ -2,7 +2,7 @@
 
 ## Demo 1: Image Generation (No Hook)
 
-A client requests an AI-generated image. No hook is used — the core handles all USDC escrow and payment natively.
+A client requests an AI-generated image. No hook is used — the core handles all USDC escrow and payment natively. This flow assumes the default zero-fee configuration.
 
 ```mermaid
 sequenceDiagram

@@ -78,7 +78,7 @@ function setHookWhitelist(address hook, bool status) external onlyRole(ADMIN_ROL
 Whitelist membership has two effects:
 
 1. The hook may be set on new jobs (checked in `createJob`).
-2. The hook can call `beforeAction` / `afterAction` on other whitelisted hooks (typically enforced via a `BaseACPHook.onlyACP` modifier on hook implementations). This enables routers that fan out to sub-hooks, but it also means every whitelisted address gains cross-invocation power over all other hooks. Only whitelist contracts you fully trust and have audited.
+2. Hook implementations may choose to trust whitelisted addresses as cross-hook callers. This enables routers that fan out to sub-hooks, but it also means every whitelisted address can gain cross-invocation power if hooks opt into that trust model. Only whitelist contracts you fully trust and have audited.
 
 In addition, `createJob` calls `ERC165Checker.supportsInterface(hook, type(IERC8183Hook).interfaceId)` for non-zero hooks; a hook that does not advertise support for the interface is rejected with `InvalidHook`.
 
@@ -122,7 +122,7 @@ function fund(
     // ... validation (status, caller, expiry, expectedBudget == budget) ...
 
     bytes memory data = abi.encode(msg.sender, optParams);
-    _beforeHook(job.hook, jobId, msg.sig, data);   // CAN revert to gate the transition
+    _beforeHook(job.hook, jobId, this.fund.selector, data);   // CAN revert to gate the transition
 
     job.status = JobStatus.Funded;
     if (job.budget > 0) {
@@ -136,9 +136,11 @@ function fund(
     }
     emit JobFunded(jobId, job.client, job.budget);
 
-    _afterHook(job.hook, jobId, msg.sig, data);    // for bookkeeping / side effects
+    _afterHook(job.hook, jobId, this.fund.selector, data);    // for bookkeeping / side effects
 }
 ```
+
+The core passes canonical base-function selectors such as `this.fund.selector`, including when a relayed `*WithAuthorization` wrapper calls the same internal transition.
 
 ## Hook Safety
 

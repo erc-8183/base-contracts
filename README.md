@@ -47,7 +47,8 @@ contracts/
 └── mocks/
     ├── MockUSDC.sol            # Test ERC20, 6 decimals
     ├── MockCBBTC.sol           # Test ERC20, 8 decimals
-    └── MockFeeOnTransferToken.sol  # Test ERC20 that takes a transfer fee (used to verify rejection)
+    ├── MockFeeOnTransferToken.sol  # Test ERC20 that takes a transfer fee (used to verify rejection)
+    └── MockERC1271NonceObserver.sol # Test ERC-1271 signer that observes nonce reservation
 ```
 
 ## Architecture
@@ -56,14 +57,14 @@ contracts/
 - **Access control** — role-based admin for fees, hook whitelisting, and payment token allowlisting
 - **Pausable** — admin can pause user-facing lifecycle functions and use `emergencyWithdraw` while paused
 - **CEI pattern** — checks, effects, interactions throughout
-- **Reentrancy protection** — transient storage guard on all state-changing functions
+- **Reentrancy protection** — transient storage guard on fund-moving and hook-calling lifecycle functions
 - **Payment token allowlist** — only admin-vetted ERC-20s can be used as payment tokens
 - **Fee-on-transfer / rebasing rejection** — `fund` snapshots the contract balance and reverts if the received amount differs from the budget
 - **Evaluator grace period** — after expiry, a Submitted job cannot be force-refunded for `EVALUATION_GRACE_PERIOD` (1 hour), giving the evaluator time to complete or reject
 - **Claim settlement fees** — direct settlements and approved claims both use the configured platform/evaluator fee split for the settled delta
 - **Streaming settlement independence** — direct `settleClaim` calls can continue while a provider milestone claim is pending; the pending claim stays open until explicitly resolved
 - **Pending claim resolution** — after expiry, a Funded job with a pending provider claim cannot be force-refunded until the claim is approved, rejected, or withdrawn; if all parties stay idle, escrow remains parked
-- **Claim replay guard** — rejected claim hashes stay consumed, so providers must vary the deliverable or `optParams` to refile
+- **Claim replay guard** — rejected claim hashes stay consumed, so providers must vary `cumulativeAmount`, the deliverable, or `optParams` to refile
 - **Authorization extension** — `ERC8183WithAuthorization` uses the base `ERC8183` EIP-712 domain so relayed entrypoints extend the same protocol identity
 - **Hook safety** — `claimRefund` is intentionally not hookable; pending claims must be resolved before refund
 
