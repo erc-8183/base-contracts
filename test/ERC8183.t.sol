@@ -214,6 +214,18 @@ contract ERC8183Test is Test {
     }
 
     // ──────────────────────────────────────────────────────────
+    // setProvider cannot assign the client as provider
+    // ──────────────────────────────────────────────────────────
+    function test_setProvider_RevertsWhenProviderIsClient() public {
+        vm.prank(client);
+        core.createJob(address(0), evaluator, _futureExpiry(), "Job without provider", address(0), 0);
+
+        vm.prank(client);
+        vm.expectRevert(ERC8183.ClientCannotBeProvider.selector);
+        core.setProvider(1, client, 0);
+    }
+
+    // ──────────────────────────────────────────────────────────
     // e2e: client requests image, provider delivers, evaluator approves
     // ──────────────────────────────────────────────────────────
     function test_e2e_FullHappyPath() public {

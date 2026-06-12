@@ -526,6 +526,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         if (actor != job.client) revert Unauthorized();
         if (job.provider != address(0)) revert WrongStatus();
         if (provider_ == address(0)) revert ZeroAddress();
+        if (provider_ == job.client) revert ClientCannotBeProvider();
         if (provider_ == job.evaluator) revert ProviderCannotBeEvaluator();
         job.provider = provider_;
         job.providerAgentId = agentId;
