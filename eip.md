@@ -73,6 +73,7 @@ Each job SHALL have at least:
 - `status` (Open | Funded | Submitted | Completed | Rejected | Expired)
 - `paymentToken` (address) — the [ERC-20](./eip-20.md) token used for payment on this job, set via `setBudget`.
 - `hook` (address) — OPTIONAL. External hook contract called before and after core functions (see Hooks below). MAY be `address(0)` (no hook).
+- `payoutReceiver` (address) — OPTIONAL. Provider-managed payout recipient. MAY be `address(0)` to pay the provider directly. Set via `setPayoutReceiver`.
 - `providerAgentId` (uint256) — OPTIONAL. When non-zero, references an agent identity in an [ERC-8004](./eip-8004.md) registry, enabling on-chain identity binding for reputation. Set via `setProvider` (or at creation if provider is known). Default `0` (unset).
 - `settledAmount` (uint256) — cumulative gross amount already released through claim settlements (see Claim Settlement below). Initially `0`. MUST be strictly monotonically increasing and MUST NOT exceed `budget`.
 
@@ -92,17 +93,19 @@ SHALL revert if `job.provider == address(0)` (provider MUST be set before fundin
 ### Core Functions
 
 - **createJob(provider, evaluator, expiredAt, description, hook?, providerAgentId?)**
-Called by client. Creates job in Open with `client = msg.sender`, `provider`, `evaluator`, `expiredAt`, `description`, and optional `hook` address. SHALL revert if `evaluator` is zero, if `expiredAt` is not at least 5 minutes in the future, if `provider == evaluator`, or if `msg.sender == provider`. **Provider MAY be zero**; if so, client MUST call `setProvider` before `fund`. `hook` MAY be `address(0)` (no hook); if non-zero, the hook MUST be admin-whitelisted and SHOULD advertise support for the `IERC8183Hook` interface via ERC-165. `providerAgentId` is the provider's [ERC-8004](./eip-8004.md) agent identity; if `provider` is non-zero and `providerAgentId` is non-zero, SHALL set `job.providerAgentId = providerAgentId`; the contract MAY verify that `provider` is the owner or operator of that `providerAgentId` on the ERC-8004 registry. Returns `jobId`.
+Called by client. Creates job in Open with `client = msg.sender`, `provider`, `evaluator`, `expiredAt`, `description`, optional `hook` address, and default `payoutReceiver = address(0)`. SHALL revert if `evaluator` is zero, if `expiredAt` is not at least 5 minutes in the future, if `provider == evaluator`, or if `msg.sender == provider`. **Provider MAY be zero**; if so, client MUST call `setProvider` before `fund`. `hook` MAY be `address(0)` (no hook); if non-zero, the hook MUST be admin-whitelisted and SHOULD advertise support for the `IERC8183Hook` interface via ERC-165. `providerAgentId` is the provider's [ERC-8004](./eip-8004.md) agent identity; if `provider` is non-zero and `providerAgentId` is non-zero, SHALL set `job.providerAgentId = providerAgentId`; the contract MAY verify that `provider` is the owner or operator of that `providerAgentId` on the ERC-8004 registry. Returns `jobId`.
+- **setPayoutReceiver(jobId, payoutReceiver)**
+Called by provider. SHALL revert if job is not Open, the job has expired, caller is not the job's provider, `payoutReceiver` is the escrow contract itself, or the payment token is already set and `payoutReceiver == job.paymentToken`. SHALL set the provider-side payout recipient for the job. `payoutReceiver` MAY be `address(0)` to pay the provider directly. Implementations SHOULD emit `PayoutReceiverSet`.
 - **setProvider(jobId, provider, agentId?)**
 Called by client. SHALL revert if job is not Open, has expired, current `job.provider != address(0)`, `provider == address(0)`, `provider == job.client`, or `provider == job.evaluator`. SHALL set `job.provider = provider`. `agentId` is the provider's [ERC-8004](./eip-8004.md) agent identity; if non-zero, SHALL set `job.providerAgentId = agentId`; the contract MAY verify that `provider` is the owner or operator of that agentId on the ERC-8004 registry.
 - **setBudget(jobId, token, amount, optParams?)**
-Called by the job's provider. Sets `job.paymentToken = token` and `job.budget = amount`. SHALL revert if job is not Open, has expired, caller is not the provider, or `token` is the zero address. Implementations SHOULD restrict `token` to an admin-managed allowlist of tokens with vetted ERC-20 semantics, to reject tokens that would break escrow accounting (e.g. fee-on-transfer, rebasing, transfer-hooked, pausable, or blacklist tokens); the reference implementation reverts with `PaymentTokenNotAllowed` for tokens not on the allowlist. `optParams` forwarded to hook if set.
+Called by the job's provider. Sets `job.paymentToken = token` and `job.budget = amount`. SHALL revert if job is not Open, has expired, caller is not the provider, `token` is the zero address, or a nonzero `payoutReceiver` already equals `token`. Implementations SHOULD restrict `token` to an admin-managed allowlist of tokens with vetted ERC-20 semantics, to reject tokens that would break escrow accounting (e.g. fee-on-transfer, rebasing, transfer-hooked, pausable, or blacklist tokens); the reference implementation reverts with `PaymentTokenNotAllowed` for tokens not on the allowlist. `optParams` forwarded to hook if set.
 - **fund(jobId, expectedBudget, optParams?)**
 Called by client. SHALL revert if job is not Open, caller is not client, **provider is not set** (`job.provider == address(0)`), `job.budget != expectedBudget` (front-running protection), or job has expired (`block.timestamp >= expiredAt`). SHALL transfer `job.budget` of the job's payment token (`job.paymentToken`) from client to the contract (escrow) and set status to Funded. Implementations SHOULD verify that the contract's balance increased by exactly `job.budget` and revert otherwise, to defend against fee-on-transfer and rebasing tokens that would silently leave the escrow short; the reference implementation reverts with `UnexpectedFundedAmount` in that case. `optParams` forwarded to hook if set.
 - **submit(jobId, deliverable, optParams?)**
 Called by provider only. SHALL revert if caller is not the job's provider, or if `job.expiredAt > 0` and the job has expired. SHALL revert if job is not Funded, unless the job is Open with `budget == 0` (zero-budget job, no escrow needed). SHALL set status to Submitted and SHOULD record `submittedAt = block.timestamp` for grace-period accounting. `deliverable` (`bytes32`) is a reference to submitted work (e.g. hash of off-chain deliverable, IPFS CID, attestation commitment). SHALL emit an event including `deliverable` (e.g. JobSubmitted). `optParams` forwarded to hook if set.
 - **complete(jobId, reason, optParams?)**
-Called by evaluator only. SHALL revert if job is not Submitted or caller is not the job's evaluator. SHALL set status to Completed. SHALL transfer the unsettled remainder (`budget - settledAmount`) to provider, minus optional platform fee to a configurable treasury and optional evaluator fee paid to the evaluator address. `reason` MAY be `bytes32(0)` or an attestation hash (OPTIONAL). SHALL emit an event including `reason` if provided. `optParams` forwarded to hook if set.
+Called by evaluator only. SHALL revert if job is not Submitted or caller is not the job's evaluator. SHALL set status to Completed. SHALL transfer the unsettled remainder (`budget - settledAmount`) to the provider-side payout recipient, minus optional platform fee to a configurable treasury and optional evaluator fee paid to the evaluator address. `reason` MAY be `bytes32(0)` or an attestation hash (OPTIONAL). SHALL emit an event including `reason` if provided. `optParams` forwarded to hook if set.
 - **reject(jobId, reason, optParams?)**
 Called by **client or provider when job is Open**, or by **evaluator when job is Funded or Submitted**. SHALL revert if job is not Open, Funded, or Submitted, or if the caller is not authorised for the current status. SHALL set status to Rejected. If Funded or Submitted, SHALL refund the unsettled remainder (`budget - settledAmount`) to client. If a settlement claim is pending, SHALL clear it (see Claim interactions below). `reason` OPTIONAL. SHALL emit an event including `reason` and the caller (rejector) if provided. `optParams` forwarded to hook if set.
 - **claimRefund(jobId)**
@@ -122,9 +125,9 @@ At most one claim is pending per job. Implementations SHALL bind the pending cla
 - **submitClaim(jobId, cumulativeAmount, deliverable, optParams?)**
 Called by **provider** only. Files a pending claim against a Funded job; moves no funds. SHALL revert if the job is not Funded, has expired, `deliverable == bytes32(0)`, a claim is already pending, `cumulativeAmount <= settledAmount`, `cumulativeAmount > budget`, or an identical claim tuple `(cumulativeAmount, deliverable, optParams)` was previously filed on this job (replay protection; implementations SHOULD track consumed claim hashes). SHALL emit ClaimSubmitted. `optParams` forwarded to hook if set.
 - **settleClaim(jobId, cumulativeAmount, deliverable, optParams?)**
-Called by **client** only. Immediate unilateral settlement: SHALL revert if the job is not Funded, has expired, `cumulativeAmount <= settledAmount`, or `cumulativeAmount > budget`. SHALL set `settledAmount = cumulativeAmount` and distribute the delta to the provider (minus optional platform/evaluator fees). `deliverable` is the client's settlement attestation, not a verified provider claim. A pending claim SHALL NOT block this function (streaming settlement); settling reduces the delta any subsequent approval of that claim would pay. SHALL emit Settled and ClaimSettled. `optParams` forwarded to hook if set.
+Called by **client** only. Immediate unilateral settlement: SHALL revert if the job is not Funded, has expired, `cumulativeAmount <= settledAmount`, or `cumulativeAmount > budget`. SHALL set `settledAmount = cumulativeAmount` and distribute the delta to the provider-side payout recipient (minus optional platform/evaluator fees). `deliverable` is the client's settlement attestation, not a verified provider claim. A pending claim SHALL NOT block this function (streaming settlement); settling reduces the delta any subsequent approval of that claim would pay. SHALL emit Settled and ClaimSettled. `optParams` forwarded to hook if set.
 - **approveClaim(jobId, cumulativeAmount, deliverable, optParams?)**
-Called by **client or evaluator**. SHALL revert if the job is not Funded, no claim is pending, or the arguments do not exactly match the pending claim — the evaluator MUST NOT be able to release amounts the provider did not claim. SHALL revert if `cumulativeAmount <= settledAmount` (e.g. the claim was already covered by direct settlement) or `cumulativeAmount > budget`. SHALL consume the pending claim, set `settledAmount = cumulativeAmount`, and distribute the delta (minus optional fees). Approval is NOT subject to an expiry check: a claim filed before expiry remains approvable, consistent with the evaluation grace period philosophy. SHALL emit Settled and ClaimApproved. `optParams` forwarded to hook if set.
+Called by **client or evaluator**. SHALL revert if the job is not Funded, no claim is pending, or the arguments do not exactly match the pending claim — the evaluator MUST NOT be able to release amounts the provider did not claim. SHALL revert if `cumulativeAmount <= settledAmount` (e.g. the claim was already covered by direct settlement) or `cumulativeAmount > budget`. SHALL consume the pending claim, set `settledAmount = cumulativeAmount`, and distribute the delta to the provider-side payout recipient (minus optional fees). Approval is NOT subject to an expiry check: a claim filed before expiry remains approvable, consistent with the evaluation grace period philosophy. SHALL emit Settled and ClaimApproved. `optParams` forwarded to hook if set.
 - **rejectClaim(jobId, cumulativeAmount, deliverable, reason, optParams?)**
 Called by **client, evaluator, or provider** (the provider withdrawing their own stale claim, e.g. to file a corrected one). SHALL revert if the job is not Funded, no claim is pending, or the arguments do not exactly match the pending claim. SHALL consume the pending claim without moving funds. The consumed claim tuple SHALL remain unfilable — a corrected claim must differ in `deliverable` or `optParams`. SHALL emit ClaimRejected. `optParams` forwarded to hook if set.
 
@@ -143,6 +146,14 @@ Called by **client, evaluator, or provider** (the provider withdrawing their own
 ### Fees
 
 Implementations MAY charge a **platform fee** and/or an **evaluator fee** (both in basis points). The platform fee is paid to a configurable treasury; the evaluator fee is paid to the job's evaluator address. The specification does not require either fee. If present, fees SHALL be computed independently on each settlement delta and on the completion remainder. Note that with integer (floor) division, the aggregate fee across many small settlements MAY be marginally lower than a single fee computed over the total released amount; implementations and integrators SHOULD treat fee totals as rounding-dependent. Fees SHALL NOT be taken on refunds.
+
+### Payout Receivers
+
+`payoutReceiver` separates provider authorization from provider-side payout custody. If unset, provider-side net payouts go to `provider`. If set by the provider before funding, provider-side net payouts from `complete`, `settleClaim`, and `approveClaim` SHALL go to `payoutReceiver`. This does not change who may act as provider, who receives platform/evaluator fees, or who receives refunds. `payoutReceiver` MUST NOT be the escrow contract itself or the job's payment token, because either case would release funds to an address without a job accounting path for the provider.
+
+Implementations MAY support `IDisburser` receivers. If the payout recipient is a contract that advertises `IDisburser` via ERC-165 at payout time, the implementation SHALL transfer the provider-side net amount first, then call `onDisbursement(jobId, selector, token, amount, optParams)`. Callback detection is dynamic: a receiver with no code when set can later deploy or delegate code and receive callbacks if it advertises `IDisburser` when paid. A revert from `onDisbursement` SHALL revert the parent action, including any platform or evaluator fee transfers made in that action. EOAs and contracts that do not advertise `IDisburser` are plain recipients. Implementations SHOULD skip the callback when the net provider-side amount is zero.
+
+Dynamic callback detection adds ERC-165 probing cost to each nonzero payout routed to a contract receiver. This is the cost of preserving payout-time behavior for counterfactual deployments, upgradeable receivers, and delegated EOAs; implementations SHOULD NOT cache receiver interface support unless they also change the documented dynamic semantics.
 
 ### Hooks (OPTIONAL)
 
@@ -174,6 +185,7 @@ When a job has a hook set, the core contract SHALL call `hook.beforeAction(...)`
 | Core function  | Hookable |
 | -------------- | -------- |
 | `createJob`    | **No** — hook is stored on the job but no callback fires on creation in the reference implementation |
+| `setPayoutReceiver` | **No** |
 | `setProvider`  | **No**   |
 | `setBudget`    | Yes      |
 | `fund`         | Yes      |
@@ -242,7 +254,7 @@ Implementations MAY provide a `BaseERC8183Hook` that routes the generic `beforeA
 
 ```
 Step 1 — createJob
-  Client → createJob(provider, evaluator, expiredAt, desc, hook=FundTransferHook)
+  Client → createJob(provider, evaluator, expiredAt, desc, hook=FundTransferHook, providerAgentId=0)
   Job created (Open), hook address stored.
 
 Step 2 — setBudget
@@ -292,7 +304,7 @@ Zero direct calls to the hook. All interactions flow through the core contract �
 
 ```
 Step 1 — createJob
-  Client → createJob(provider=0, evaluator, expiredAt, desc, hook=BiddingHook)
+  Client → createJob(provider=0, evaluator, expiredAt, desc, hook=BiddingHook, providerAgentId=0)
   Job created (Open), provider = address(0).
 
 Step 2 — setBudget (opens bidding via hook callback)
@@ -332,10 +344,12 @@ Implementations SHOULD emit at least:
 - **BudgetSet**(jobId, token, amount) — includes the payment token address
 - **JobFunded**(jobId, client, amount)
 - **JobSubmitted**(jobId, provider, deliverable) — when provider submits work for evaluation
+- **PayoutReceiverSet**(jobId, payoutReceiver) — when a provider-side payout receiver is set or updated
 - **JobCompleted**(jobId, evaluator, reason)
 - **JobRejected**(jobId, rejector, reason)
 - **JobExpired**(jobId)
-- **PaymentReleased**(jobId, provider, amount) — net amount paid to the provider on completion or on each settlement
+- **PaymentReleased**(jobId, recipient, amount) — net provider-side amount paid to the provider or payout receiver on completion or on each settlement
+- **Disbursed**(jobId, receiver, selector, amount) — emitted after `IDisburser.onDisbursement` is invoked
 - **PlatformFeePaid**(jobId, platformTreasury, amount) — only emitted when a non-zero platform fee is taken
 - **EvaluatorFeePaid**(jobId, evaluator, amount) — only emitted when a non-zero evaluator fee is taken
 - **Refunded**(jobId, client, amount)
@@ -359,6 +373,7 @@ Implementations that add admin tooling SHOULD also emit operational events (e.g.
 - **Cumulative amounts, not deltas**: Settlement functions take the cumulative total released to date, making them idempotent under replay and benign under races — a re-submitted or stale settlement reverts (no new settlement) instead of double-paying.
 - **Two settlement paths, one ledger**: Unilateral client settlement (`settleClaim`) and attested claim approval (`approveClaim`) carry different authorization semantics — who may call, expiry behaviour, and what is being consented to — and deliberately remain separate functions with distinct selectors, keeping caller intent explicit on-chain and immune to front-running between paths. They share one monotone `settledAmount`, which is the cross-path double-payment defense.
 - **Single pending claim, hash-bound**: Storing only a hash of the pending claim keeps storage minimal and forces approvers to present (and, in the Signed Authorizations extension, sign over) the full claim contents they are approving.
+- **Payout receivers**: A provider may route provider-side net payouts through a receiver contract or custody address without changing who controls the job lifecycle. Optional `IDisburser` callbacks let receivers split or forward funds they already received while keeping escrow accounting in the core contract.
 - **Hooks over inheritance**: Optional hook contracts let integrators extend the protocol (validation, reputation, fees) without modifying or inheriting from the core contract. The core stays minimal; complexity lives in the hook.
 - **Generic hook interface**: The `IERC8183Hook` interface uses just two functions (`beforeAction`/`afterAction`) with a selector parameter rather than named functions per action. This keeps the interface stable as the core protocol evolves — new hookable functions simply produce new selector values without changing the interface.
 
@@ -437,7 +452,7 @@ No backward compatibility issues found. Claim settlement is additive over earlie
 
 ## Reference Implementation
 
-The reference implementation consists of two contracts: `IERC8183Hook`, the optional and minimal hook interface that developers implement, and `ERC8183`, the core Job primitive with escrow and optional hook extension points.
+The reference implementation consists of `IERC8183Hook`, the optional and minimal hook interface that developers implement; `IDisburser`, the optional payout receiver callback interface; and `ERC8183`, the core Job primitive with escrow and optional hook extension points.
 
 ### IERC8183Hook.sol
 
@@ -452,6 +467,18 @@ interface IERC8183Hook is IERC165 {
 }
 ```
 
+### IDisburser.sol
+
+```solidity
+pragma solidity ^0.8.20;
+
+import "@openzeppelin/contracts/utils/introspection/IERC165.sol";
+
+interface IDisburser is IERC165 {
+    function onDisbursement(uint256 jobId, bytes4 selector, address token, uint256 amount, bytes calldata data) external;
+}
+```
+
 ### ERC8183.sol and ERC8183WithAuthorization.sol
 
 The full reference implementation lives alongside this document in the repository: `contracts/ERC8183.sol` (core job escrow with claim settlement and hooks) and `contracts/ERC8183WithAuthorization.sol` (the Signed Authorizations extension). The earlier inline listing is replaced by the external interface below; consult the source for the authoritative implementation.
@@ -460,6 +487,7 @@ The full reference implementation lives alongside this document in the repositor
 interface IERC8183 {
     // ── Job lifecycle ──
     function createJob(address provider, address evaluator, uint48 expiredAt, string calldata description, address hook, uint256 providerAgentId) external returns (uint256 jobId);
+    function setPayoutReceiver(uint256 jobId, address payoutReceiver) external;
     function setProvider(uint256 jobId, address provider, uint256 agentId) external;
     function setBudget(uint256 jobId, address token, uint256 amount, bytes calldata optParams) external;
     function fund(uint256 jobId, uint256 expectedBudget, bytes calldata optParams) external;
@@ -495,6 +523,8 @@ function DOMAIN_SEPARATOR() external view returns (bytes32);
 - Evaluator is trusted for completion and rejection once the job is Submitted; a malicious evaluator can complete or reject arbitrarily. Use reputation (e.g. [ERC-8004](./eip-8004.md)) or staking for high-value jobs.
 - Once Funded, only the evaluator can reject, and only the provider can submit; the client cannot unilaterally withdraw, which protects the provider after they start work.
 - **Evaluator settlement scope:** the evaluator can approve only the exact pending claim the provider filed, never originate or alter amounts; the client can settle freely but only toward the job's provider out of their own escrow. Widening either authority breaks the trust model — in particular, allowing the evaluator to settle arbitrary amounts would escalate the evaluator from attestor to spender of client escrow.
+- **Provider-controlled payout receiver:** `payoutReceiver` controls where provider-side net payouts are sent and is therefore set by the provider while the job is Open. The reference design locks the receiver once the job is Funded so funded jobs cannot be rerouted away from a receiver that downstream custody, financing, or disbursement flows may rely on. Providers SHOULD choose receiver contracts carefully: a receiver that advertises `IDisburser` and reverts in `onDisbursement` will roll back completion or settlement, including platform and evaluator fee transfers, at the cost of blocking the provider's own payout. Evaluators can reject a Funded or Submitted job rather than complete into a reverting receiver, which refunds the client and pays no one.
+- **Dynamic receiver code:** `IDisburser` detection happens at payout time. A plain EOA receiver can later gain delegated code through mechanisms such as [EIP-7702](https://eips.ethereum.org/EIPS/eip-7702), and a counterfactual receiver can later deploy code at the selected address. These changes can make callbacks begin firing after the job was funded; because only the provider can select the receiver, this is provider-controlled risk.
 - **Pending-claim refund blocking is bounded griefing:** a provider's pending claim blocks `claimRefund` on a Funded job past expiry, but on non-hooked jobs the client can always clear it with `rejectClaim` and refund in the next transaction. On hooked jobs a reverting `rejectClaim` hook can keep the claim pinned; clients accepting a hook accept this as part of the job's policy.
 - **Consumed claim hashes:** rejected or withdrawn claim tuples remain consumed, so a rejected claim cannot be silently refiled and later approved; a refile must visibly differ in `deliverable` or `optParams`.
 - **Authorization liveness:** a signed authorization is live until its deadline, use, or cancellation. `cancelAuthorization` remaining callable while paused is a deliberate incident-response property — pausing the contract must not trap signers with outstanding signatures.
