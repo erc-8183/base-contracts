@@ -20,7 +20,7 @@ sequenceDiagram
 
     Note over C,E: -- Funding --
     rect rgb(255, 243, 224)
-        C->>Core: fund(jobId, 20 USDC, "0x")
+        C->>Core: fund(jobId, USDC, 20 USDC, "0x")
         Note over C,Core: 20 USDC: Client -> Core (escrowed)<br/>Open -> Funded
     end
 

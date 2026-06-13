@@ -6,7 +6,11 @@ import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.s
 
 import {ERC8183} from "../contracts/ERC8183.sol";
 import {ERC8183WithAuthorization} from "../contracts/ERC8183WithAuthorization.sol";
-import {MockERC1271NonceObserver} from "../contracts/mocks/MockERC1271NonceObserver.sol";
+import {
+    MockERC1271NonceObserver,
+    MockERC1271Rejector
+} from "../contracts/mocks/MockERC1271NonceObserver.sol";
+import {MockCBBTC} from "../contracts/mocks/MockCBBTC.sol";
 import {MockUSDC} from "../contracts/mocks/MockUSDC.sol";
 
 contract ERC8183WithAuthorizationTest is Test {
@@ -29,7 +33,7 @@ contract ERC8183WithAuthorizationTest is Test {
         "SetBudgetAuthorization(address signer,uint256 jobId,address token,uint256 amount,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
     bytes32 constant FUND_AUTHORIZATION_TYPEHASH = keccak256(
-        "FundAuthorization(address signer,uint256 jobId,uint256 expectedBudget,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
+        "FundAuthorization(address signer,uint256 jobId,address expectedToken,uint256 expectedBudget,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
     bytes32 constant SUBMIT_AUTHORIZATION_TYPEHASH = keccak256(
         "SubmitAuthorization(address signer,uint256 jobId,bytes32 deliverable,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
@@ -66,9 +70,15 @@ contract ERC8183WithAuthorizationTest is Test {
     address relayer = makeAddr("relayer");
 
     event AuthorizationUsed(address indexed signer, bytes32 indexed nonce);
+    event AuthorizationCanceled(address indexed signer, bytes32 indexed nonce);
     event PayoutReceiverSet(uint256 indexed jobId, address indexed payoutReceiver);
     event ClaimSubmitted(
-        uint256 indexed jobId, address indexed provider, uint256 cumulativeAmount, uint256 delta, bytes32 deliverable
+        uint256 indexed jobId,
+        address indexed provider,
+        uint256 cumulativeAmount,
+        uint256 delta,
+        bytes32 deliverable,
+        bytes optParams
     );
     event ClaimSettled(
         uint256 indexed jobId, address indexed settler, uint256 cumulativeAmount, uint256 delta, bytes32 deliverable
@@ -275,6 +285,7 @@ contract ERC8183WithAuthorizationTest is Test {
         uint256 signerPk,
         address signer,
         uint256 jobId,
+        address expectedToken,
         uint256 expectedBudget,
         bytes memory optParams,
         uint72 nonce,
@@ -284,7 +295,14 @@ contract ERC8183WithAuthorizationTest is Test {
             signerPk,
             keccak256(
                 abi.encode(
-                    FUND_AUTHORIZATION_TYPEHASH, signer, jobId, expectedBudget, _hashBytes(optParams), nonce, deadline
+                    FUND_AUTHORIZATION_TYPEHASH,
+                    signer,
+                    jobId,
+                    expectedToken,
+                    expectedBudget,
+                    _hashBytes(optParams),
+                    nonce,
+                    deadline
                 )
             )
         );
@@ -469,7 +487,7 @@ contract ERC8183WithAuthorizationTest is Test {
         vm.prank(provider);
         core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
         vm.prank(client);
-        core.fund(jobId, TWENTY_USDC, "");
+        core.fund(jobId, address(usdc), TWENTY_USDC, "");
     }
 
     function _relayCreateJob(
@@ -499,9 +517,9 @@ contract ERC8183WithAuthorizationTest is Test {
     }
 
     function _relayFund(uint256 jobId, uint72 nonce, uint256 deadline) internal {
-        bytes memory sig = _signFund(clientPk, client, jobId, TWENTY_USDC, "", nonce, deadline);
+        bytes memory sig = _signFund(clientPk, client, jobId, address(usdc), TWENTY_USDC, "", nonce, deadline);
         vm.prank(relayer);
-        core.fundWithAuthorization(jobId, TWENTY_USDC, "", _auth(client, nonce, deadline, sig));
+        core.fundWithAuthorization(jobId, address(usdc), TWENTY_USDC, "", _auth(client, nonce, deadline, sig));
     }
 
     function _relaySubmit(uint256 jobId, bytes32 deliverable, uint72 nonce, uint256 deadline) internal {
@@ -522,6 +540,7 @@ contract ERC8183WithAuthorizationTest is Test {
 
     function test_claimAuthorizationTypehashesArePublic() public view {
         _assertPublicTypehash("SET_PROVIDER_AUTHORIZATION_TYPEHASH()", SET_PROVIDER_AUTHORIZATION_TYPEHASH);
+        _assertPublicTypehash("FUND_AUTHORIZATION_TYPEHASH()", FUND_AUTHORIZATION_TYPEHASH);
         _assertPublicTypehash("REJECT_AUTHORIZATION_TYPEHASH()", REJECT_AUTHORIZATION_TYPEHASH);
         _assertPublicTypehash("SUBMIT_CLAIM_AUTHORIZATION_TYPEHASH()", SUBMIT_CLAIM_AUTHORIZATION_TYPEHASH);
         _assertPublicTypehash("SETTLE_CLAIM_AUTHORIZATION_TYPEHASH()", SETTLE_CLAIM_AUTHORIZATION_TYPEHASH);
@@ -579,6 +598,38 @@ contract ERC8183WithAuthorizationTest is Test {
 
         assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Completed));
         assertEq(usdc.balanceOf(provider), TWENTY_USDC);
+    }
+
+    function test_fundWithAuthorization_RevertsWhenPaymentTokenChangesAfterSigning() public {
+        MockCBBTC cbbtc = new MockCBBTC();
+
+        vm.prank(deployer);
+        core.setPaymentTokenAllowed(address(cbbtc), true);
+
+        cbbtc.mint(client, TWENTY_USDC);
+        vm.prank(client);
+        cbbtc.approve(address(core), TWENTY_USDC);
+
+        uint256 deadline = _deadline();
+        uint256 jobId =
+            _relayCreateJob(client, clientPk, provider, evaluator, _futureExpiry(), "fund token binding", 65, deadline);
+
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
+
+        uint72 nonce = 66;
+        bytes memory sig = _signFund(clientPk, client, jobId, address(usdc), TWENTY_USDC, "", nonce, deadline);
+
+        vm.prank(provider);
+        core.setBudget(jobId, address(cbbtc), TWENTY_USDC, "");
+
+        vm.expectRevert(ERC8183.PaymentTokenMismatch.selector);
+        vm.prank(relayer);
+        core.fundWithAuthorization(jobId, address(usdc), TWENTY_USDC, "", _auth(client, nonce, deadline, sig));
+
+        assertFalse(core.authorizationNonceUsed(_packNonce(client, nonce)));
+        assertEq(usdc.balanceOf(address(core)), 0);
+        assertEq(cbbtc.balanceOf(address(core)), 0);
     }
 
     function test_createJobWithAuthorizationLeavesPayoutReceiverUnset() public {
@@ -685,7 +736,7 @@ contract ERC8183WithAuthorizationTest is Test {
         vm.expectEmit(true, true, true, true, address(core));
         emit AuthorizationUsed(provider, _packNonce(provider, 21));
         vm.expectEmit(true, true, true, true, address(core));
-        emit ClaimSubmitted(jobId, provider, TEN_USDC, TEN_USDC, deliverable);
+        emit ClaimSubmitted(jobId, provider, TEN_USDC, TEN_USDC, deliverable, optParams);
         vm.prank(relayer);
         core.submitClaimWithAuthorization(
             jobId, TEN_USDC, deliverable, optParams, _auth(provider, 21, deadline, submitClaimSig)
@@ -757,6 +808,26 @@ contract ERC8183WithAuthorizationTest is Test {
         assertEq(core.getJob(jobId).settledAmount, TEN_USDC);
         assertEq(core.pendingClaimHash(jobId), bytes32(0));
         assertEq(usdc.balanceOf(provider), TEN_USDC);
+    }
+
+    function test_claimAuthorizationRejectsCrossFunctionReplayWithSameLayout() public {
+        uint256 jobId = _createFundedJob();
+        uint256 deadline = _deadline();
+        bytes32 deliverable = bytes32("milestone-1");
+        uint72 nonce = 67;
+
+        vm.prank(provider);
+        core.submitClaim(jobId, TEN_USDC, deliverable, "");
+
+        bytes memory settleSig = _signSettleClaim(clientPk, client, jobId, TEN_USDC, deliverable, "", nonce, deadline);
+
+        vm.expectRevert(ERC8183WithAuthorization.InvalidAuthorizationSignature.selector);
+        vm.prank(relayer);
+        core.approveClaimWithAuthorization(jobId, TEN_USDC, deliverable, "", _auth(client, nonce, deadline, settleSig));
+
+        assertFalse(core.authorizationNonceUsed(_packNonce(client, nonce)));
+        assertEq(core.pendingClaimHash(jobId), _claimBindingHash(TEN_USDC, deliverable, ""));
+        assertEq(core.getJob(jobId).settledAmount, 0);
     }
 
     function test_rejectsReplayedAuthorizations() public {
@@ -832,6 +903,25 @@ contract ERC8183WithAuthorizationTest is Test {
         assertEq(core.getJob(1).client, signer);
     }
 
+    function test_rejectsERC1271InvalidSignatureAndRollsBackNonce() public {
+        MockERC1271Rejector contractSigner = new MockERC1271Rejector();
+        address signer = address(contractSigner);
+        uint48 expiry = _futureExpiry();
+        uint256 deadline = _deadline();
+        uint72 nonce = 32;
+        bytes32 packed = _packNonce(signer, nonce);
+        string memory description = "erc1271 invalid";
+        ERC8183WithAuthorization.CreateJobAuthorizationParams memory params =
+            _createParams(provider, evaluator, expiry, description, address(0), 0);
+
+        vm.expectRevert(ERC8183WithAuthorization.InvalidAuthorizationSignature.selector);
+        vm.prank(relayer);
+        core.createJobWithAuthorization(params, _auth(signer, nonce, deadline, hex""));
+
+        assertFalse(core.authorizationNonceUsed(packed));
+        assertEq(core.jobCounter(), 0);
+    }
+
     function test_acceptsMaximumUint72NonceAndStoresPackedKey() public {
         uint48 expiry = _futureExpiry();
         uint256 deadline = _deadline();
@@ -892,7 +982,7 @@ contract ERC8183WithAuthorizationTest is Test {
         );
 
         vm.expectEmit(true, true, true, true, address(core));
-        emit AuthorizationUsed(client, _packNonce(client, nonce));
+        emit AuthorizationCanceled(client, _packNonce(client, nonce));
         vm.prank(client);
         core.cancelAuthorization(nonce);
 

@@ -20,7 +20,7 @@ contract ERC8183WithAuthorization is ERC8183 {
         "SetBudgetAuthorization(address signer,uint256 jobId,address token,uint256 amount,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
     bytes32 public constant FUND_AUTHORIZATION_TYPEHASH = keccak256(
-        "FundAuthorization(address signer,uint256 jobId,uint256 expectedBudget,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
+        "FundAuthorization(address signer,uint256 jobId,address expectedToken,uint256 expectedBudget,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
     bytes32 public constant SUBMIT_AUTHORIZATION_TYPEHASH = keccak256(
         "SubmitAuthorization(address signer,uint256 jobId,bytes32 deliverable,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
@@ -44,7 +44,7 @@ contract ERC8183WithAuthorization is ERC8183 {
         "RejectClaimAuthorization(address signer,uint256 jobId,uint256 cumulativeAmount,bytes32 deliverable,bytes32 reason,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
 
-    /// @notice Tracks used packed nonces: bytes20(signer) || uint72 nonce.
+    /// @notice Tracks used packed nonces: uint160(signer) in the upper 160 bits, 24 zero padding bits, then uint72 nonce.
     mapping(bytes32 => bool) public authorizationNonceUsed;
 
     struct Authorization {
@@ -64,6 +64,7 @@ contract ERC8183WithAuthorization is ERC8183 {
     }
 
     event AuthorizationUsed(address indexed signer, bytes32 indexed nonce);
+    event AuthorizationCanceled(address indexed signer, bytes32 indexed nonce);
 
     error AuthorizationExpired();
     error AuthorizationNonceUsed();
@@ -91,7 +92,7 @@ contract ERC8183WithAuthorization is ERC8183 {
         bytes32 packedNonce = _packAuthorizationNonce(msg.sender, nonce);
         if (authorizationNonceUsed[packedNonce]) revert AuthorizationNonceUsed();
         authorizationNonceUsed[packedNonce] = true;
-        emit AuthorizationUsed(msg.sender, packedNonce);
+        emit AuthorizationCanceled(msg.sender, packedNonce);
     }
 
     function createJobWithAuthorization(
@@ -201,6 +202,7 @@ contract ERC8183WithAuthorization is ERC8183 {
 
     function fundWithAuthorization(
         uint256 jobId,
+        address expectedToken,
         uint256 expectedBudget,
         bytes calldata optParams,
         Authorization calldata auth
@@ -210,11 +212,20 @@ contract ERC8183WithAuthorization is ERC8183 {
             auth.nonce,
             auth.deadline,
             keccak256(
-                abi.encode(FUND_AUTHORIZATION_TYPEHASH, auth.signer, jobId, expectedBudget, keccak256(optParams), auth.nonce, auth.deadline)
+                abi.encode(
+                    FUND_AUTHORIZATION_TYPEHASH,
+                    auth.signer,
+                    jobId,
+                    expectedToken,
+                    expectedBudget,
+                    keccak256(optParams),
+                    auth.nonce,
+                    auth.deadline
+                )
             ),
             auth.sig
         );
-        _fund(auth.signer, jobId, expectedBudget, optParams);
+        _fund(auth.signer, jobId, expectedToken, expectedBudget, optParams);
     }
 
     function submitWithAuthorization(

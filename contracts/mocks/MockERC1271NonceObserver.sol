@@ -18,3 +18,11 @@ contract MockERC1271NonceObserver is IERC1271 {
         return INVALID_SIGNATURE;
     }
 }
+
+contract MockERC1271Rejector is IERC1271 {
+    bytes4 private constant INVALID_SIGNATURE = 0xffffffff;
+
+    function isValidSignature(bytes32, bytes calldata) external pure returns (bytes4) {
+        return INVALID_SIGNATURE;
+    }
+}

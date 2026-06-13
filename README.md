@@ -43,12 +43,14 @@ When `hook == address(0)`, the contract operates as a standalone job escrow with
 contracts/
 ├── ERC8183.sol                 # Core state machine, escrow, fees, hooks
 ├── ERC8183WithAuthorization.sol # EIP-712 authorization extension for relayed calls
+├── IDisburser.sol              # Optional payout receiver callback interface
 ├── IERC8183Hook.sol            # Hook interface (beforeAction/afterAction)
 └── mocks/
     ├── MockUSDC.sol            # Test ERC20, 6 decimals
     ├── MockCBBTC.sol           # Test ERC20, 8 decimals
+    ├── MockDisburser.sol       # Test payout receiver and reentrancy callbacks
     ├── MockFeeOnTransferToken.sol  # Test ERC20 that takes a transfer fee (used to verify rejection)
-    └── MockERC1271NonceObserver.sol # Test ERC-1271 signer that observes nonce reservation
+    └── MockERC1271NonceObserver.sol # Test ERC-1271 signer helpers
 ```
 
 ## Architecture

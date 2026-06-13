@@ -197,7 +197,8 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         address indexed provider,
         uint256 cumulativeAmount,
         uint256 delta,
-        bytes32 deliverable
+        bytes32 deliverable,
+        bytes optParams // Emitted so the exact claim preimage can be propagated to observers.
     );
     /// @notice Emitted when a client settles a claim directly
     /// @dev `deliverable` is the client's settlement attestation, not a verified
@@ -276,6 +277,8 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     error HookNotWhitelisted();
     /// @notice Thrown when the client's expectedBudget does not match the stored budget
     error BudgetMismatch();
+    /// @notice Thrown when the client's expected payment token does not match the stored payment token
+    error PaymentTokenMismatch();
     /// @notice Thrown when the evaluator and provider are the same address
     error ProviderCannotBeEvaluator();
     /// @notice Thrown when the client and provider are the same address
@@ -589,7 +592,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     /// @notice Assigns a provider to an Open job that has no provider yet. Client only.
     /// @param jobId The job to assign a provider to
     /// @param provider_ The provider address
-    function setProvider(uint256 jobId, address provider_, uint256 agentId) external whenNotPaused {
+    function setProvider(uint256 jobId, address provider_, uint256 agentId) external whenNotPaused nonReentrant {
         _setProvider(msg.sender, jobId, provider_, agentId);
     }
 
@@ -650,19 +653,22 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
 
     /// @notice Client funds the job escrow. Transitions Open -> Funded.
     /// @param jobId The job to fund
+    /// @param expectedToken Must match the stored payment token (prevents token-swap front-running)
     /// @param expectedBudget Must match the stored budget (prevents front-running)
     /// @param optParams Hook-specific parameters (passed to before/after hooks)
     function fund(
         uint256 jobId,
+        address expectedToken,
         uint256 expectedBudget,
         bytes calldata optParams
     ) external whenNotPaused nonReentrant {
-        _fund(msg.sender, jobId, expectedBudget, optParams);
+        _fund(msg.sender, jobId, expectedToken, expectedBudget, optParams);
     }
 
     function _fund(
         address actor,
         uint256 jobId,
+        address expectedToken,
         uint256 expectedBudget,
         bytes calldata optParams
     ) internal {
@@ -672,6 +678,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         if (actor != job.client) revert Unauthorized();
         if (job.provider == address(0)) revert ProviderNotSet();
         if (block.timestamp >= job.expiredAt) revert WrongStatus();
+        if (job.paymentToken != expectedToken) revert PaymentTokenMismatch();
         if (job.budget != expectedBudget) revert BudgetMismatch();
 
         bytes memory data = abi.encode(actor, optParams);
@@ -944,7 +951,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         submittedClaimHash[jobId][claimHash] = true;
         pendingClaimHash[jobId] = claimHash;
 
-        emit ClaimSubmitted(jobId, actor, cumulativeAmount, delta, deliverable);
+        emit ClaimSubmitted(jobId, actor, cumulativeAmount, delta, deliverable, optParams);
         _afterHook(job.hook, jobId, this.submitClaim.selector, data);
     }
 
@@ -1060,7 +1067,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         bytes memory data = abi.encode(actor, cumulativeAmount, deliverable, reason, optParams);
         _beforeHook(job.hook, jobId, this.rejectClaim.selector, data);
 
-        // Keep submittedClaimHash consumed; callers must change deliverable or optParams to refile.
+        // Keep submittedClaimHash consumed; callers must change cumulative amount, deliverable, or optParams to refile.
         delete pendingClaimHash[jobId];
         emit ClaimRejected(jobId, actor, reason);
 

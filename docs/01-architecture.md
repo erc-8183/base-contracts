@@ -20,7 +20,7 @@ stateDiagram-v2
     Funded --> Rejected: reject()\n[evaluator only]\n↩️ client refunded
     Funded --> Expired: claimRefund()\n[after expiry]\n[no pending claim]\n↩️ client refunded
 
-    Submitted --> Completed: complete(reason)\n[evaluator only]\n💸 provider paid
+    Submitted --> Completed: complete(reason)\n[evaluator only]\n💸 provider / payout receiver paid
     Submitted --> Rejected: reject(reason)\n[evaluator only]\n↩️ client refunded
     Submitted --> Expired: claimRefund()\n[after expiry + grace]\n↩️ client refunded
 
@@ -35,7 +35,7 @@ After expiry, `claimRefund` is callable by anyone. For `Submitted` jobs, it is g
 
 For indexing, `Settled` is the generic cumulative accounting event emitted for every claim delta. `ClaimSubmitted`, `ClaimApproved`, `ClaimSettled`, and `ClaimRejected` describe the claim lifecycle path and any associated deliverable/reason. `PaymentReleased` is emitted only when a positive provider net transfer occurs.
 
-`ERC8183WithAuthorization` uses the same EIP-712 domain as the base protocol: name `ERC8183`, version `1`. The authorization contract extends ERC8183 entrypoints rather than creating a separate signing domain; upgraded proxies can call the admin-gated `initializeAuthorizationV2()` during `upgradeToAndCall` to initialize EIP-712 storage when the prior implementation did not already do so. Authorizations use packed `(signer, uint72 nonce)` replay protection. A signer can directly call `cancelAuthorization(nonce)` to burn one of their own outstanding nonces; this function is not relayed and is deliberately callable while paused so users can revoke signed messages during an incident.
+`ERC8183WithAuthorization` uses the same EIP-712 domain as the base protocol: name `ERC8183`, version `1`. The authorization contract extends ERC8183 entrypoints rather than creating a separate signing domain; upgraded proxies can call the admin-gated `initializeAuthorizationV2()` during `upgradeToAndCall` to initialize EIP-712 storage when the prior implementation did not already do so. Authorizations use packed `(signer, uint72 nonce)` replay protection. A signer can directly call `cancelAuthorization(nonce)` to burn one of their own outstanding nonces; this function is not relayed and is deliberately callable while paused so users can revoke signed messages during an incident. Evaluators should sign `completeWithAuthorization` and `rejectWithAuthorization` only after observing the job state they intend to attest to, because those terminal signatures do not bind the submitted deliverable or a status snapshot.
 
 ## Sequence — Typical Job Flow (No Hook)
 
@@ -49,7 +49,7 @@ sequenceDiagram
     Note over AC: Status: Open
     C->>AC: createJob(provider, evaluator, expiry, desc, address(0), agentId)
     P->>AC: setBudget(jobId, token, amount, "0x")
-    C->>AC: fund(jobId, expectedBudget, "0x")
+    C->>AC: fund(jobId, expectedToken, expectedBudget, "0x")
     Note over AC: 💰 Budget escrowed (balance delta == budget)
     Note over AC: Status: Funded
 
@@ -109,7 +109,7 @@ sequenceDiagram
     Note over H: CAN revert to block
     AC->>H: afterAction(jobId, setBudget.selector, data)
 
-    C->>AC: fund(jobId, expectedBudget, optParams)
+    C->>AC: fund(jobId, expectedToken, expectedBudget, optParams)
     AC->>H: beforeAction(jobId, fund.selector, data)
     Note over AC: 💰 Budget escrowed
     AC->>H: afterAction(jobId, fund.selector, data)
@@ -150,7 +150,7 @@ sequenceDiagram
     P->>AC: setPayoutReceiver(jobId, newReceiver)
     Note over AC: provider-only, Open only; locked once Funded
     P->>AC: setBudget(jobId, token, amount, "0x")
-    C->>AC: fund(jobId, expectedBudget, "0x")
+    C->>AC: fund(jobId, expectedToken, expectedBudget, "0x")
     Note over AC: Status: Funded
 
     alt Provider claim settlement

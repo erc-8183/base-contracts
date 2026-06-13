@@ -26,6 +26,7 @@ interface IERC8183Hook is IERC165 {
 | Core function | Hooked? | Notes |
 |---------------|---------|-------|
 | `createJob`   | **No**  | Hook is stored on the job, but no callbacks fire on creation. |
+| `setPayoutReceiver` | **No** | Provider-side payout routing is set while Open; no hook callbacks. |
 | `setProvider` | **No**  | Client-only assignment of the provider. |
 | `setBudget`   | Yes     | before + after |
 | `fund`        | Yes     | before + after |
@@ -115,11 +116,12 @@ Each hookable function follows the same pattern (illustrated for `fund`):
 ```solidity
 function fund(
     uint256 jobId,
+    address expectedToken,
     uint256 expectedBudget,
     bytes calldata optParams
 ) external whenNotPaused nonReentrant {
     Job storage job = jobs[jobId];
-    // ... validation (status, caller, expiry, expectedBudget == budget) ...
+    // ... validation (status, caller, expiry, expectedToken == paymentToken, expectedBudget == budget) ...
 
     bytes memory data = abi.encode(msg.sender, optParams);
     _beforeHook(job.hook, jobId, this.fund.selector, data);   // CAN revert to gate the transition
