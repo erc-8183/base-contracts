@@ -131,8 +131,9 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     );
     /// @notice Emitted when the provider sets or updates the job budget
     event BudgetSet(
-        uint256 indexed jobId, 
-        address indexed token, 
+        uint256 indexed jobId,
+        address indexed actor,
+        address indexed token,
         uint256 amount
     );
     /// @notice Emitted when the client funds the job escrow
@@ -693,7 +694,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
 
         job.paymentToken = token;
         job.budget = amount;
-        emit BudgetSet(jobId, token, amount);
+        emit BudgetSet(jobId, actor, token, amount);
 
         _afterHook(job.hook, jobId, this.setBudget.selector, data);
     }

@@ -125,7 +125,7 @@ contract ERC8183Test is Test {
 
     // Events (must match ERC8183.sol exactly for vm.expectEmit)
     event ProviderSet(uint256 indexed jobId, address indexed actor, address indexed provider, uint256 agentId);
-    event BudgetSet(uint256 indexed jobId, address indexed token, uint256 amount);
+    event BudgetSet(uint256 indexed jobId, address indexed actor, address indexed token, uint256 amount);
     event JobFunded(uint256 indexed jobId, address indexed client, uint256 amount);
     event JobSubmitted(uint256 indexed jobId, address indexed provider, bytes32 deliverable);
     event JobCompleted(uint256 indexed jobId, address indexed evaluator, bytes32 reason);
@@ -384,7 +384,7 @@ contract ERC8183Test is Test {
 
         // Step 2: provider sets budget — expect BudgetSet event
         vm.expectEmit(true, true, true, true, address(core));
-        emit BudgetSet(jobId, address(usdc), TWENTY_USDC);
+        emit BudgetSet(jobId, provider, address(usdc), TWENTY_USDC);
         vm.prank(provider);
         core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
 
