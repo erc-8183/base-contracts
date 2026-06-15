@@ -107,6 +107,50 @@ contract SelectiveRevertHook is IERC8183Hook {
     }
 }
 
+/// @notice A contract client that also acts as its own hook: on claimRefund it atomically
+///         forwards the refunded escrow to the real end-beneficiary. Models the intended
+///         reason claimRefund hooks are blocking — a failed forward must roll back the
+///         entire refund so funds are never stranded in this intermediary.
+contract ForwardingClient is IERC8183Hook {
+    ERC8183 immutable core;
+    MockUSDC immutable token;
+    address public beneficiary;
+    bool public failForward;
+
+    constructor(ERC8183 core_, MockUSDC token_, address beneficiary_) {
+        core = core_;
+        token = token_;
+        beneficiary = beneficiary_;
+    }
+
+    function setFailForward(bool v) external {
+        failForward = v;
+    }
+
+    function createJob(address provider, address evaluator, uint48 expiry) external returns (uint256) {
+        return core.createJob(provider, evaluator, expiry, "forwarded", address(this), 0, "");
+    }
+
+    function fund(uint256 jobId, uint256 amount) external {
+        token.approve(address(core), amount);
+        core.fund(jobId, address(token), amount, "");
+    }
+
+    function beforeAction(uint256, bytes4, bytes calldata) external override {}
+
+    function afterAction(uint256, bytes4 selector, bytes calldata) external override {
+        if (selector == ERC8183.claimRefund.selector) {
+            require(!failForward, "forward failed");
+            uint256 bal = token.balanceOf(address(this));
+            if (bal > 0) require(token.transfer(beneficiary, bal), "transfer failed");
+        }
+    }
+
+    function supportsInterface(bytes4 id) external pure override returns (bool) {
+        return id == type(IERC8183Hook).interfaceId || id == type(IERC165).interfaceId;
+    }
+}
+
 /// @notice Image Generation — E2E flow (no hook, core-only payment).
 ///         Mirrors the original Hardhat suite in test/ERC8183.test.js.
 contract ERC8183Test is Test {
@@ -1571,5 +1615,55 @@ contract ERC8183Test is Test {
         core.claimRefund(jobId, "");
         assertEq(usdc.balanceOf(client), balBefore + TEN_USDC);
         assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Expired));
+    }
+
+    // A contract client forwards the refund to the real beneficiary in its afterAction hook.
+    // This is the intended reason the claimRefund hook is blocking.
+    function test_claimRefund_contractClientForwardsRefundAtomically() public {
+        address endClient = makeAddr("endClient");
+        ForwardingClient fc = new ForwardingClient(core, usdc, endClient);
+        vm.prank(deployer);
+        core.setHookWhitelist(address(fc), true);
+
+        // Fund the contract-client so it can fund the job (it is job.client and the hook).
+        usdc.mint(address(fc), TEN_USDC);
+        uint256 jobId = fc.createJob(provider, evaluator, _futureExpiry());
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TEN_USDC, "");
+        fc.fund(jobId, TEN_USDC);
+
+        vm.warp(block.timestamp + 3601);
+        core.claimRefund(jobId, "");
+
+        // Refund landed at the contract-client and was atomically forwarded to the real client.
+        assertEq(usdc.balanceOf(endClient), TEN_USDC);
+        assertEq(usdc.balanceOf(address(fc)), 0);
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Expired));
+    }
+
+    // If the contract client's forward fails, the entire refund MUST roll back — funds are
+    // never stranded in the intermediary. This is why the hook is intentionally blocking.
+    function test_claimRefund_contractClientFailedForwardRevertsEntireRefund() public {
+        address endClient = makeAddr("endClient");
+        ForwardingClient fc = new ForwardingClient(core, usdc, endClient);
+        vm.prank(deployer);
+        core.setHookWhitelist(address(fc), true);
+
+        usdc.mint(address(fc), TEN_USDC);
+        uint256 jobId = fc.createJob(provider, evaluator, _futureExpiry());
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TEN_USDC, "");
+        fc.fund(jobId, TEN_USDC);
+
+        fc.setFailForward(true);
+        vm.warp(block.timestamp + 3601);
+
+        vm.expectRevert(bytes("forward failed"));
+        core.claimRefund(jobId, "");
+
+        // Whole tx rolled back: job still Funded, escrow intact, nothing forwarded.
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Funded));
+        assertEq(usdc.balanceOf(address(core)), TEN_USDC);
+        assertEq(usdc.balanceOf(endClient), 0);
     }
 }

@@ -912,12 +912,19 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     /// @notice Claims a refund for an expired job. Anyone can call.
     ///         Transitions Open/Funded/Submitted -> Expired after expiry time.
     ///         Pending claims must still be resolved before refund.
-    /// @dev    Hookable: the attached hook's before/after callbacks fire around the
-    ///         refund and MAY revert. Because this is the permissionless escrow
-    ///         recovery path, a misbehaving hook that reverts can block the refund
-    ///         and lock escrowed funds. Mitigations: hooks are admin-whitelisted and
-    ///         ERC-165-checked at attach time, and an admin can sever a bad hook from
-    ///         in-flight jobs via batchDetachHook (after which claimRefund succeeds).
+    /// @dev    Hookable, and intentionally BLOCKING. The refund is paid to `job.client`,
+    ///         which may be a contract standing in for the real beneficiary (e.g. a
+    ///         smart account or router). The `afterAction` callback runs after the refund
+    ///         transfer (see ordering below) so that client contract can atomically
+    ///         forward the funds to the rightful end-client. The callbacks therefore MAY
+    ///         revert to roll the whole refund back — this is required: a failed forward
+    ///         MUST NOT leave funds stranded in the intermediary client contract.
+    ///         Trade-off: this removes the unconditional post-expiry refund guarantee — a
+    ///         buggy/reverting hook can block the refund. Mitigations: hooks are
+    ///         admin-whitelisted and ERC-165-checked at attach time, and an admin can sever
+    ///         a hook from in-flight jobs via batchDetachHook (after which claimRefund
+    ///         proceeds with no callbacks). Deployments that need an unconditional refund
+    ///         guarantee should attach no hook (or a hook that never reverts on this path).
     /// @param jobId The expired job to claim refund for
     /// @param optParams Hook-specific parameters (passed to before/after hooks)
     function claimRefund(uint256 jobId, bytes calldata optParams) external whenNotPaused nonReentrant {

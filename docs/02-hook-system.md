@@ -63,12 +63,18 @@ All payloads begin with `address actor` so the hook knows who authorized the tra
 For direct calls `actor` is `msg.sender`; for `*WithAuthorization` calls it is the EIP-712
 signer; for the permissionless `claimRefund` it is `msg.sender` (whoever triggered the refund).
 
-> **Fund-lock caveat for `claimRefund`.** `claimRefund` is the permissionless escrow
-> recovery path, and it is fully hookable — a hook's `beforeAction`/`afterAction` MAY revert.
-> A misbehaving hook that reverts can therefore block the refund and lock escrowed funds.
-> Mitigations: hooks are admin-whitelisted and ERC-165-checked at attach time, and an admin
-> can sever a bad hook from in-flight jobs via `batchDetachHook` (after which `claimRefund`
-> succeeds). Only whitelist hooks you fully trust and have audited.
+> **`claimRefund` is intentionally a blocking hook.** The refund is paid to `job.client`,
+> which may be a contract standing in for the real beneficiary (e.g. a smart account or
+> router). `claimRefund`'s `afterAction` runs *after* the refund transfer, so that client
+> contract can atomically forward the funds to the rightful end-client. The callback must be
+> able to revert the whole refund — a failed forward must not strand funds in the intermediary.
+>
+> The accepted trade-off: as the permissionless recovery path, a buggy or fail-closed hook
+> that reverts on `claimRefund` can block the refund and lock escrowed funds. Mitigations:
+> hooks are admin-whitelisted and ERC-165-checked at attach time, and an admin can sever a
+> bad hook from in-flight jobs via `batchDetachHook` (after which `claimRefund` succeeds with
+> no callbacks). Only whitelist hooks you fully trust and have audited; deployments that don't
+> need contract-client forwarding and want an unconditional refund should attach no hook.
 
 ### Signed-authorization note
 
