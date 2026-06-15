@@ -8,7 +8,7 @@ interface IReentrantERC8183 {
     function settleClaim(uint256 jobId, uint256 cumulativeAmount, bytes32 deliverable, bytes calldata optParams)
         external;
     function complete(uint256 jobId, bytes32 reason, bytes calldata optParams) external;
-    function claimRefund(uint256 jobId) external;
+    function claimRefund(uint256 jobId, bytes calldata optParams) external;
 }
 
 contract MockDisburser is IDisburser, ERC165 {
@@ -104,7 +104,7 @@ contract ReentrantDisburser is IDisburser, ERC165 {
                 );
         }
         if (action == Action.ClaimRefund) {
-            return address(core).call(abi.encodeCall(IReentrantERC8183.claimRefund, (targetJobId)));
+            return address(core).call(abi.encodeCall(IReentrantERC8183.claimRefund, (targetJobId, bytes(""))));
         }
         return (true, "");
     }

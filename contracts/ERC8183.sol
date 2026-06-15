@@ -889,9 +889,16 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
 
     /// @notice Claims a refund for an expired job. Anyone can call.
     ///         Transitions Open/Funded/Submitted -> Expired after expiry time.
-    ///         Not hookable; pending claims must still be resolved before refund.
+    ///         Pending claims must still be resolved before refund.
+    /// @dev    Hookable: the attached hook's before/after callbacks fire around the
+    ///         refund and MAY revert. Because this is the permissionless escrow
+    ///         recovery path, a misbehaving hook that reverts can block the refund
+    ///         and lock escrowed funds. Mitigations: hooks are admin-whitelisted and
+    ///         ERC-165-checked at attach time, and an admin can sever a bad hook from
+    ///         in-flight jobs via batchDetachHook (after which claimRefund succeeds).
     /// @param jobId The expired job to claim refund for
-    function claimRefund(uint256 jobId) external whenNotPaused nonReentrant {
+    /// @param optParams Hook-specific parameters (passed to before/after hooks)
+    function claimRefund(uint256 jobId, bytes calldata optParams) external whenNotPaused nonReentrant {
         Job storage job = jobs[jobId];
         if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Open && job.status != JobStatus.Funded && job.status != JobStatus.Submitted)
@@ -905,6 +912,9 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
             if (block.timestamp < job.expiredAt) revert WrongStatus();
         }
 
+        bytes memory data = abi.encode(msg.sender, optParams);
+        _beforeHook(job.hook, jobId, this.claimRefund.selector, data);
+
         JobStatus prev = job.status;
         job.status = JobStatus.Expired;
 
@@ -915,6 +925,8 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         }
 
         emit JobExpired(jobId);
+
+        _afterHook(job.hook, jobId, this.claimRefund.selector, data);
     }
 
     function _distributeSettlement(
