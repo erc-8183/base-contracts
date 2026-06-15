@@ -76,6 +76,23 @@ signer; for the permissionless `claimRefund` it is `msg.sender` (whoever trigger
 > no callbacks). Only whitelist hooks you fully trust and have audited; deployments that don't
 > need contract-client forwarding and want an unconditional refund should attach no hook.
 
+The forwarding flow, concretely (the `ForwardingClient` in the test suite demonstrates it):
+
+```
+claimRefund(jobId)
+  ├─ status -> Expired
+  ├─ transfer (budget - settledAmount) to job.client      // the client *contract*
+  └─ afterAction(jobId, claimRefund.selector, data)        // runs AFTER the transfer
+       └─ job.client forwards the received funds to the real end-beneficiary
+          └─ if the forward reverts, the whole claimRefund reverts:
+             escrow stays put, nothing is stranded in job.client
+```
+
+Because the callback runs after the transfer and can revert the whole call, the refund and
+the onward forward are atomic. A hook attached to such a job MUST handle the `claimRefund`
+selector (forward, or no-op) and MUST NOT revert on it for reasons unrelated to a genuine
+forward failure — otherwise it permanently blocks the only refund path until `batchDetachHook`.
+
 ### Signed-authorization note
 
 The `optParams` for `createJob`, `setProvider`, and `setPayoutReceiver` are bound into their

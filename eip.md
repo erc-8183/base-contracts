@@ -111,6 +111,27 @@ Called by **client or provider when job is Open**, or by **evaluator when job is
 - **claimRefund(jobId, optParams)**
 Callable by anyone when status is Open, Funded, or Submitted. SHALL revert if status is Open or Funded and `block.timestamp < job.expiredAt`. SHALL revert if status is Submitted and `block.timestamp < job.expiredAt + EVALUATION_GRACE_PERIOD` (the grace period protects an evaluator who is mid-review from being censored by a third-party refund call; implementations MAY set the grace period length or omit it). SHALL revert if a settlement claim is pending on a non-Submitted job (claims can only arise while Funded) — pending claims MUST be resolved (approved, rejected, or withdrawn) before an expiry refund. SHALL set status to Expired. If the prior status was Funded or Submitted, SHALL transfer the unsettled remainder (`budget - settledAmount`), if non-zero, to the client. MAY be hookable; if hookable, the `beforeAction`/`afterAction` callbacks fire around the refund and a reverting hook can block it (see the liveness caveat under **Hook security**). Implementations requiring an unconditional post-expiry refund SHALL keep `claimRefund` non-hookable.
 
+> **Design rationale — refund forwarding for contract clients.** `claimRefund` is
+> intentionally hookable *and* its callbacks are intentionally **blocking**, to support a
+> `job.client` that is a contract standing in for the ultimate beneficiary (for example a
+> smart account, custodial vault, or routing contract that fans funds out to an off-protocol
+> recipient). The refund is paid to `job.client`, and `claimRefund`'s `afterAction` callback
+> runs **after** that transfer (the ordering is normative: pay the client, then call
+> `afterAction`). This lets the client contract observe the freshly received refund and
+> **atomically forward it onward** to the rightful end-client within the same transaction.
+>
+> Because the forward and the refund must be all-or-nothing, the callback MUST be able to
+> revert the entire `claimRefund`: a forward that fails (e.g. the downstream recipient
+> reverts, or the client contract is misconfigured) MUST roll the refund back rather than
+> leave funds stranded in the intermediary contract with no way to reach the beneficiary.
+> A non-blocking (fail-open) callback would be unsafe here, since it would complete the
+> refund into the intermediary while silently dropping the forward.
+>
+> The accepted cost is that the post-expiry refund is no longer *unconditionally* live: a
+> buggy or fail-closed hook can revert and block it (see **Hook security**). Deployments that
+> do not need contract-client forwarding SHOULD attach no hook (or a hook that never reverts
+> on the `claimRefund` selector) so the refund stays unconditional.
+
 ### Claim Settlement
 
 While a job is Funded, escrow MAY be released incrementally through **claim settlement**, ahead of (or instead of) terminal completion. Two settlement paths share one ledger:
