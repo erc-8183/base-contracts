@@ -68,7 +68,7 @@ contracts/
 - **Pending claim resolution** — after expiry, a Funded job with a pending provider claim cannot be force-refunded until the claim is approved, rejected, or withdrawn; if all parties stay idle, escrow remains parked
 - **Claim replay guard** — rejected claim hashes stay consumed, so providers must vary `cumulativeAmount`, the deliverable, or `optParams` to refile
 - **Authorization extension** — `ERC8183WithAuthorization` uses the base `ERC8183` EIP-712 domain so relayed entrypoints extend the same protocol identity; signers can call `cancelAuthorization` directly to burn one of their own outstanding nonces
-- **Hook safety** — `claimRefund` is intentionally not hookable; pending claims must be resolved before refund
+- **Hook safety** — `claimRefund` is hookable, but as the permissionless refund path a reverting hook can block it; hook whitelisting + ERC-165 checks and admin `batchDetachHook` mitigate this. Pending claims must still be resolved before refund
 
 See [docs/01-architecture.md](docs/01-architecture.md) for state machine and sequence diagrams.
 

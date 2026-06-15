@@ -509,6 +509,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     /// @param description Human-readable job description
     /// @param hook Hook contract address (address(0) = no hook, must be whitelisted)
     /// @param providerAgentId Optional ERC-8004 agent identity for provider
+    /// @param optParams Hook-specific parameters (passed to the afterAction hook)
     /// @return The new job ID
     function createJob(
         address provider,
@@ -594,6 +595,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     ///         Locked once the job is funded.
     /// @param jobId The job to update
     /// @param payoutReceiver New payout receiver (address(0) = pay provider directly)
+    /// @param optParams Hook-specific parameters (passed to before/after hooks)
     function setPayoutReceiver(uint256 jobId, address payoutReceiver, bytes calldata optParams)
         external
         whenNotPaused
@@ -627,6 +629,8 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     /// @notice Assigns a provider to an Open job that has no provider yet. Client only.
     /// @param jobId The job to assign a provider to
     /// @param provider_ The provider address
+    /// @param agentId Optional ERC-8004 agent identity for the provider
+    /// @param optParams Hook-specific parameters (passed to before/after hooks)
     function setProvider(uint256 jobId, address provider_, uint256 agentId, bytes calldata optParams)
         external
         whenNotPaused

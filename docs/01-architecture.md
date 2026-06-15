@@ -91,7 +91,7 @@ sequenceDiagram
 
 ## Sequence — Job with Hook
 
-`createJob` is not hookable in the reference implementation — the hook is stored on the job but no callbacks fire on creation. Hooks begin firing on `setBudget`.
+`createJob` fires the hook's `afterAction` only (the hook is attached during creation, so no `beforeAction` can run); `beforeAction`/`afterAction` then fire on every subsequent lifecycle call (`setProvider`, `setPayoutReceiver`, `setBudget`, and onward).
 
 ```mermaid
 sequenceDiagram
