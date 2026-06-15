@@ -119,6 +119,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     /// @notice Emitted when the payout receiver for a job is set or updated
     event PayoutReceiverSet(
         uint256 indexed jobId,
+        address indexed actor,
         address indexed payoutReceiver
     );
     /// @notice Emitted when onDisbursement is invoked for a receiver that advertises IDisburser
@@ -575,19 +576,34 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     ///         Locked once the job is funded.
     /// @param jobId The job to update
     /// @param payoutReceiver New payout receiver (address(0) = pay provider directly)
-    function setPayoutReceiver(uint256 jobId, address payoutReceiver) external whenNotPaused nonReentrant {
-        _setPayoutReceiver(msg.sender, jobId, payoutReceiver);
+    function setPayoutReceiver(uint256 jobId, address payoutReceiver, bytes calldata optParams)
+        external
+        whenNotPaused
+        nonReentrant
+    {
+        _setPayoutReceiver(msg.sender, jobId, payoutReceiver, optParams);
     }
 
-    function _setPayoutReceiver(address actor, uint256 jobId, address payoutReceiver) internal {
+    function _setPayoutReceiver(
+        address actor,
+        uint256 jobId,
+        address payoutReceiver,
+        bytes calldata optParams
+    ) internal {
         Job storage job = jobs[jobId];
         if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
         if (block.timestamp >= job.expiredAt) revert WrongStatus();
         if (actor != job.provider) revert Unauthorized();
         _validatePayoutReceiver(payoutReceiver, job.paymentToken);
+
+        bytes memory data = abi.encode(actor, payoutReceiver, optParams);
+        _beforeHook(job.hook, jobId, this.setPayoutReceiver.selector, data);
+
         job.payoutReceiver = payoutReceiver;
-        emit PayoutReceiverSet(jobId, payoutReceiver);
+        emit PayoutReceiverSet(jobId, actor, payoutReceiver);
+
+        _afterHook(job.hook, jobId, this.setPayoutReceiver.selector, data);
     }
 
     /// @notice Assigns a provider to an Open job that has no provider yet. Client only.

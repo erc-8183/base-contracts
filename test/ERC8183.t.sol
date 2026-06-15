@@ -108,7 +108,7 @@ contract ERC8183Test is Test {
     event JobSubmitted(uint256 indexed jobId, address indexed provider, bytes32 deliverable);
     event JobCompleted(uint256 indexed jobId, address indexed evaluator, bytes32 reason);
     event PaymentReleased(uint256 indexed jobId, address indexed recipient, uint256 amount);
-    event PayoutReceiverSet(uint256 indexed jobId, address indexed payoutReceiver);
+    event PayoutReceiverSet(uint256 indexed jobId, address indexed actor, address indexed payoutReceiver);
     event Disbursed(uint256 indexed jobId, address indexed receiver, bytes4 selector, uint256 amount);
     event PaymentTokenAllowlistUpdated(address indexed token, bool status);
     event Settled(uint256 indexed jobId, uint256 cumulativeAmount, uint256 delta);
@@ -161,7 +161,7 @@ contract ERC8183Test is Test {
         jobId = core.createJob(provider, evaluator, _futureExpiry(), "claim job", address(0), 0);
         if (payoutReceiver != address(0)) {
             vm.prank(provider);
-            core.setPayoutReceiver(jobId, payoutReceiver);
+            core.setPayoutReceiver(jobId, payoutReceiver, "");
         }
         vm.prank(provider);
         core.setBudget(jobId, address(usdc), amount, "");
@@ -794,7 +794,7 @@ contract ERC8183Test is Test {
 
         vm.expectRevert(ERC8183.InvalidReceiver.selector);
         vm.prank(provider);
-        core.setPayoutReceiver(1, address(core));
+        core.setPayoutReceiver(1, address(core), "");
     }
 
     function test_payoutReceiver_RevertsWhenReceiverIsPaymentTokenAfterBudget() public {
@@ -806,7 +806,7 @@ contract ERC8183Test is Test {
 
         vm.expectRevert(ERC8183.InvalidReceiver.selector);
         vm.prank(provider);
-        core.setPayoutReceiver(jobId, address(usdc));
+        core.setPayoutReceiver(jobId, address(usdc), "");
     }
 
     function test_setBudget_RevertsWhenExistingReceiverIsPaymentToken() public {
@@ -814,7 +814,7 @@ contract ERC8183Test is Test {
         uint256 jobId = core.createJob(provider, evaluator, _futureExpiry(), "budget token receiver", address(0), 0);
 
         vm.prank(provider);
-        core.setPayoutReceiver(jobId, address(usdc));
+        core.setPayoutReceiver(jobId, address(usdc), "");
 
         vm.expectRevert(ERC8183.InvalidReceiver.selector);
         vm.prank(provider);
@@ -829,7 +829,7 @@ contract ERC8183Test is Test {
         uint256 jobId = core.createJob(provider, evaluator, expiry, "refund receiver", address(0), 0);
 
         vm.prank(provider);
-        core.setPayoutReceiver(jobId, payoutReceiver);
+        core.setPayoutReceiver(jobId, payoutReceiver, "");
         vm.prank(provider);
         core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
         vm.prank(client);
@@ -856,27 +856,27 @@ contract ERC8183Test is Test {
 
         vm.expectRevert(ERC8183.Unauthorized.selector);
         vm.prank(client);
-        core.setPayoutReceiver(jobId, address(disburser));
+        core.setPayoutReceiver(jobId, address(disburser), "");
 
         vm.expectEmit(true, true, true, true, address(core));
-        emit PayoutReceiverSet(jobId, address(plainReceiver));
+        emit PayoutReceiverSet(jobId, provider, address(plainReceiver));
         vm.prank(provider);
-        core.setPayoutReceiver(jobId, address(plainReceiver));
+        core.setPayoutReceiver(jobId, address(plainReceiver), "");
 
         vm.expectEmit(true, true, true, true, address(core));
-        emit PayoutReceiverSet(jobId, address(disburser));
+        emit PayoutReceiverSet(jobId, provider, address(disburser));
         vm.prank(provider);
-        core.setPayoutReceiver(jobId, address(disburser));
+        core.setPayoutReceiver(jobId, address(disburser), "");
         assertEq(core.getJob(jobId).payoutReceiver, address(disburser));
 
         vm.expectEmit(true, true, true, true, address(core));
-        emit PayoutReceiverSet(jobId, address(0));
+        emit PayoutReceiverSet(jobId, provider, address(0));
         vm.prank(provider);
-        core.setPayoutReceiver(jobId, address(0));
+        core.setPayoutReceiver(jobId, address(0), "");
         assertEq(core.getJob(jobId).payoutReceiver, address(0));
 
         vm.prank(provider);
-        core.setPayoutReceiver(jobId, address(disburser));
+        core.setPayoutReceiver(jobId, address(disburser), "");
 
         vm.prank(provider);
         core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
@@ -885,13 +885,13 @@ contract ERC8183Test is Test {
 
         vm.expectRevert(ERC8183.WrongStatus.selector);
         vm.prank(provider);
-        core.setPayoutReceiver(jobId, address(0));
+        core.setPayoutReceiver(jobId, address(0), "");
     }
 
     function test_setPayoutReceiver_RevertsForInvalidJob() public {
         vm.expectRevert(ERC8183.InvalidJob.selector);
         vm.prank(provider);
-        core.setPayoutReceiver(1, address(0));
+        core.setPayoutReceiver(1, address(0), "");
     }
 
     function test_setPayoutReceiver_AssignedProviderCanSetReceiver() public {
@@ -904,9 +904,9 @@ contract ERC8183Test is Test {
         core.setProvider(1, provider, 0, "");
 
         vm.expectEmit(true, true, true, true, address(core));
-        emit PayoutReceiverSet(1, payoutReceiver);
+        emit PayoutReceiverSet(1, provider, payoutReceiver);
         vm.prank(provider);
-        core.setPayoutReceiver(1, payoutReceiver);
+        core.setPayoutReceiver(1, payoutReceiver, "");
 
         assertEq(core.getJob(1).payoutReceiver, payoutReceiver);
     }
@@ -920,7 +920,42 @@ contract ERC8183Test is Test {
         vm.warp(uint256(expiry));
         vm.expectRevert(ERC8183.WrongStatus.selector);
         vm.prank(provider);
-        core.setPayoutReceiver(1, makeAddr("lateReceiver"));
+        core.setPayoutReceiver(1, makeAddr("lateReceiver"), "");
+    }
+
+    // setPayoutReceiver fires before + after hooks with the encoded payload
+    function test_setPayoutReceiver_firesBeforeAndAfterHooks() public {
+        RecordingHook hook = new RecordingHook();
+        vm.prank(deployer);
+        core.setHookWhitelist(address(hook), true);
+
+        vm.prank(client);
+        core.createJob(provider, evaluator, _futureExpiry(), "hooked", address(hook), 0);
+
+        address receiver = makeAddr("hookReceiver");
+        vm.prank(provider);
+        core.setPayoutReceiver(1, receiver, hex"cafe");
+
+        assertEq(hook.lastSelector(), core.setPayoutReceiver.selector);
+        assertEq(hook.beforeCount(), 1);
+        assertEq(hook.afterCount(), 1);
+        assertEq(hook.lastData(), abi.encode(provider, receiver, bytes(hex"cafe")));
+    }
+
+    // a reverting before hook gates the transition
+    function test_setPayoutReceiver_beforeHookRevertGates() public {
+        RevertingHook hook = new RevertingHook();
+        vm.prank(deployer);
+        core.setHookWhitelist(address(hook), true);
+
+        vm.prank(client);
+        core.createJob(provider, evaluator, _futureExpiry(), "hooked", address(hook), 0);
+
+        vm.prank(provider);
+        vm.expectRevert(bytes("blocked"));
+        core.setPayoutReceiver(1, makeAddr("hookReceiver"), "");
+
+        assertEq(core.getJob(1).payoutReceiver, address(0));
     }
 
     function test_complete_RevertsWhenReceiverDisburserRevertsStrictly() public {
