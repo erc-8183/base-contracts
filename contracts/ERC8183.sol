@@ -111,8 +111,9 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     );
     /// @notice Emitted when a provider is assigned to a job
     event ProviderSet(
-        uint256 indexed jobId, 
-        address indexed provider, 
+        uint256 indexed jobId,
+        address indexed actor,
+        address indexed provider,
         uint256 agentId
     );
     /// @notice Emitted when the payout receiver for a job is set or updated
@@ -592,11 +593,21 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     /// @notice Assigns a provider to an Open job that has no provider yet. Client only.
     /// @param jobId The job to assign a provider to
     /// @param provider_ The provider address
-    function setProvider(uint256 jobId, address provider_, uint256 agentId) external whenNotPaused nonReentrant {
-        _setProvider(msg.sender, jobId, provider_, agentId);
+    function setProvider(uint256 jobId, address provider_, uint256 agentId, bytes calldata optParams)
+        external
+        whenNotPaused
+        nonReentrant
+    {
+        _setProvider(msg.sender, jobId, provider_, agentId, optParams);
     }
 
-    function _setProvider(address actor, uint256 jobId, address provider_, uint256 agentId) internal {
+    function _setProvider(
+        address actor,
+        uint256 jobId,
+        address provider_,
+        uint256 agentId,
+        bytes calldata optParams
+    ) internal {
         Job storage job = jobs[jobId];
         if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
@@ -606,9 +617,15 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         if (provider_ == address(0)) revert ZeroAddress();
         if (provider_ == job.client) revert ClientCannotBeProvider();
         if (provider_ == job.evaluator) revert ProviderCannotBeEvaluator();
+
+        bytes memory data = abi.encode(actor, provider_, agentId, optParams);
+        _beforeHook(job.hook, jobId, this.setProvider.selector, data);
+
         job.provider = provider_;
         job.providerAgentId = agentId;
-        emit ProviderSet(jobId, provider_, agentId);
+        emit ProviderSet(jobId, actor, provider_, agentId);
+
+        _afterHook(job.hook, jobId, this.setProvider.selector, data);
     }
 
     /// @notice Provider sets or updates the job budget. Can be called multiple times while Open and not expired.

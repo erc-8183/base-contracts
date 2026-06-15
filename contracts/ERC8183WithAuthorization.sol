@@ -14,7 +14,7 @@ contract ERC8183WithAuthorization is ERC8183 {
         "SetPayoutReceiverAuthorization(address signer,uint256 jobId,address payoutReceiver,uint72 nonce,uint256 deadline)"
     );
     bytes32 public constant SET_PROVIDER_AUTHORIZATION_TYPEHASH = keccak256(
-        "SetProviderAuthorization(address signer,uint256 jobId,address provider,uint256 agentId,uint72 nonce,uint256 deadline)"
+        "SetProviderAuthorization(address signer,uint256 jobId,address provider,uint256 agentId,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
     bytes32 public constant SET_BUDGET_AUTHORIZATION_TYPEHASH = keccak256(
         "SetBudgetAuthorization(address signer,uint256 jobId,address token,uint256 amount,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
@@ -158,6 +158,7 @@ contract ERC8183WithAuthorization is ERC8183 {
         uint256 jobId,
         address provider_,
         uint256 agentId,
+        bytes calldata optParams,
         Authorization calldata auth
     ) external whenNotPaused nonReentrant {
         _verifyAuthorization(
@@ -165,11 +166,20 @@ contract ERC8183WithAuthorization is ERC8183 {
             auth.nonce,
             auth.deadline,
             keccak256(
-                abi.encode(SET_PROVIDER_AUTHORIZATION_TYPEHASH, auth.signer, jobId, provider_, agentId, auth.nonce, auth.deadline)
+                abi.encode(
+                    SET_PROVIDER_AUTHORIZATION_TYPEHASH,
+                    auth.signer,
+                    jobId,
+                    provider_,
+                    agentId,
+                    keccak256(optParams),
+                    auth.nonce,
+                    auth.deadline
+                )
             ),
             auth.sig
         );
-        _setProvider(auth.signer, jobId, provider_, agentId);
+        _setProvider(auth.signer, jobId, provider_, agentId, optParams);
     }
 
     function setBudgetWithAuthorization(

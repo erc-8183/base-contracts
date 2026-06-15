@@ -46,6 +46,45 @@ contract PendingClaimObserverHook is IERC8183Hook {
     }
 }
 
+/// @notice Records before/after hook invocations for assertions.
+contract RecordingHook is IERC8183Hook {
+    bytes4 public lastSelector;
+    uint256 public beforeCount;
+    uint256 public afterCount;
+    bytes public lastData;
+
+    function beforeAction(uint256, bytes4 selector, bytes calldata data) external override {
+        lastSelector = selector;
+        beforeCount++;
+        lastData = data;
+    }
+
+    function afterAction(uint256, bytes4 selector, bytes calldata data) external override {
+        lastSelector = selector;
+        afterCount++;
+        lastData = data;
+    }
+
+    function supportsInterface(bytes4 id) external pure override returns (bool) {
+        return id == type(IERC8183Hook).interfaceId || id == type(IERC165).interfaceId;
+    }
+}
+
+/// @notice Reverts on every callback — used to prove hooks can gate transitions.
+contract RevertingHook is IERC8183Hook {
+    function beforeAction(uint256, bytes4, bytes calldata) external pure override {
+        revert("blocked");
+    }
+
+    function afterAction(uint256, bytes4, bytes calldata) external pure override {
+        revert("blocked");
+    }
+
+    function supportsInterface(bytes4 id) external pure override returns (bool) {
+        return id == type(IERC8183Hook).interfaceId || id == type(IERC165).interfaceId;
+    }
+}
+
 /// @notice Image Generation — E2E flow (no hook, core-only payment).
 ///         Mirrors the original Hardhat suite in test/ERC8183.test.js.
 contract ERC8183Test is Test {
@@ -63,7 +102,7 @@ contract ERC8183Test is Test {
     address evaluator = makeAddr("evaluator");
 
     // Events (must match ERC8183.sol exactly for vm.expectEmit)
-    event ProviderSet(uint256 indexed jobId, address indexed provider, uint256 agentId);
+    event ProviderSet(uint256 indexed jobId, address indexed actor, address indexed provider, uint256 agentId);
     event BudgetSet(uint256 indexed jobId, address indexed token, uint256 amount);
     event JobFunded(uint256 indexed jobId, address indexed client, uint256 amount);
     event JobSubmitted(uint256 indexed jobId, address indexed provider, bytes32 deliverable);
@@ -243,9 +282,9 @@ contract ERC8183Test is Test {
 
         uint256 AGENT_ID_2 = 7;
         vm.expectEmit(true, true, true, true, address(core));
-        emit ProviderSet(2, provider, AGENT_ID_2);
+        emit ProviderSet(2, client, provider, AGENT_ID_2);
         vm.prank(client);
-        core.setProvider(2, provider, AGENT_ID_2);
+        core.setProvider(2, provider, AGENT_ID_2, "");
 
         assertEq(core.getJob(2).providerAgentId, AGENT_ID_2);
 
@@ -264,7 +303,41 @@ contract ERC8183Test is Test {
 
         vm.prank(client);
         vm.expectRevert(ERC8183.ClientCannotBeProvider.selector);
-        core.setProvider(1, client, 0);
+        core.setProvider(1, client, 0, "");
+    }
+
+    // setProvider fires before + after hooks with the encoded payload
+    function test_setProvider_firesBeforeAndAfterHooks() public {
+        RecordingHook hook = new RecordingHook();
+        vm.prank(deployer);
+        core.setHookWhitelist(address(hook), true);
+
+        vm.prank(client);
+        core.createJob(address(0), evaluator, _futureExpiry(), "hooked", address(hook), 0);
+
+        vm.prank(client);
+        core.setProvider(1, provider, 7, hex"beef");
+
+        assertEq(hook.lastSelector(), core.setProvider.selector);
+        assertEq(hook.beforeCount(), 1);
+        assertEq(hook.afterCount(), 1);
+        assertEq(hook.lastData(), abi.encode(client, provider, uint256(7), bytes(hex"beef")));
+    }
+
+    // a reverting before hook gates the transition
+    function test_setProvider_beforeHookRevertGates() public {
+        RevertingHook hook = new RevertingHook();
+        vm.prank(deployer);
+        core.setHookWhitelist(address(hook), true);
+
+        vm.prank(client);
+        core.createJob(address(0), evaluator, _futureExpiry(), "hooked", address(hook), 0);
+
+        vm.prank(client);
+        vm.expectRevert(bytes("blocked"));
+        core.setProvider(1, provider, 0, "");
+
+        assertEq(core.getJob(1).provider, address(0));
     }
 
     // ──────────────────────────────────────────────────────────
@@ -828,7 +901,7 @@ contract ERC8183Test is Test {
         core.createJob(address(0), evaluator, _futureExpiry(), "late receiver provider", address(0), 0);
 
         vm.prank(client);
-        core.setProvider(1, provider, 0);
+        core.setProvider(1, provider, 0, "");
 
         vm.expectEmit(true, true, true, true, address(core));
         emit PayoutReceiverSet(1, payoutReceiver);
