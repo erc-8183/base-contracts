@@ -1006,6 +1006,26 @@ contract ERC8183Test is Test {
         assertGt(jobId, 0);
     }
 
+    // for a providerless job, the hook payload's agentId is canonicalized to 0, matching storage
+    function test_createJob_providerlessJobCanonicalizesAgentIdInHookPayload() public {
+        RecordingHook hook = new RecordingHook();
+        vm.prank(deployer);
+        core.setHookWhitelist(address(hook), true);
+
+        uint48 expiry = _futureExpiry();
+        // provider == address(0) but a nonzero agentId is supplied.
+        vm.prank(client);
+        uint256 jobId = core.createJob(address(0), evaluator, expiry, "hooked", address(hook), 999, "");
+
+        // Stored agent id is canonicalized to 0...
+        assertEq(core.getJob(jobId).providerAgentId, 0);
+        // ...and the hook payload must agree with storage (not the raw 999).
+        assertEq(
+            hook.lastData(),
+            abi.encode(client, address(0), evaluator, expiry, address(hook), uint256(0), bytes(""))
+        );
+    }
+
     // a reverting afterAction rejects job creation entirely
     function test_createJob_afterHookRevertRejectsCreation() public {
         RevertingHook hook = new RevertingHook();

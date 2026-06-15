@@ -558,6 +558,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
             budget: 0,
             hook: hook,
             paymentToken: address(0),
+            // A providerless job has no provider to attribute, so its agent id is zero.
             providerAgentId: provider != address(0) ? providerAgentId : 0,
             description: description,
             settledAmount: 0,
@@ -577,11 +578,13 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         // initialize per-job bookkeeping or revert to reject a job it will not service.
         // No beforeAction — there is no attached hook before creation, and attachment
         // is already gated by the whitelist + ERC-165 check above.
+        // The payload reads providerAgentId back from storage so the hook never sees an
+        // agent id that disagrees with jobs[jobId] (e.g. a providerless job canonicalizes to 0).
         _afterHook(
             hook,
             jobId,
             this.createJob.selector,
-            abi.encode(client, provider, evaluator, expiredAt, hook, providerAgentId, optParams)
+            abi.encode(client, provider, evaluator, expiredAt, hook, jobs[jobId].providerAgentId, optParams)
         );
 
         return jobId;
