@@ -515,9 +515,10 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         uint48 expiredAt,
         string calldata description,
         address hook,
-        uint256 providerAgentId
+        uint256 providerAgentId,
+        bytes calldata optParams
     ) external whenNotPaused nonReentrant returns (uint256) {
-        return _createJob(msg.sender, provider, evaluator, expiredAt, description, hook, providerAgentId);
+        return _createJob(msg.sender, provider, evaluator, expiredAt, description, hook, providerAgentId, optParams);
     }
 
     function _createJob(
@@ -527,7 +528,8 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         uint48 expiredAt,
         string calldata description,
         address hook,
-        uint256 providerAgentId
+        uint256 providerAgentId,
+        bytes calldata optParams
     ) internal returns (uint256) {
         if (client == address(0)) revert ZeroAddress();
         if (expiredAt <= block.timestamp + 5 minutes) revert ExpiryTooShort();
@@ -569,6 +571,18 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
             expiredAt,
             hook
         );
+
+        // afterAction only: the hook is now attached and the job exists, so it can
+        // initialize per-job bookkeeping or revert to reject a job it will not service.
+        // No beforeAction — there is no attached hook before creation, and attachment
+        // is already gated by the whitelist + ERC-165 check above.
+        _afterHook(
+            hook,
+            jobId,
+            this.createJob.selector,
+            abi.encode(client, provider, evaluator, expiredAt, hook, providerAgentId, optParams)
+        );
+
         return jobId;
     }
 
