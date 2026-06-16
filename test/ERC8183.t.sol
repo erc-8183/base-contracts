@@ -1617,6 +1617,38 @@ contract ERC8183Test is Test {
         assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Expired));
     }
 
+    // Break-glass: if a hook blocks the refund, admin pause() + emergencyWithdraw recovers the
+    // escrow regardless of the hook. This is the governance backstop for refund liveness.
+    function test_claimRefund_blockedByHook_adminEmergencyWithdrawRecovers() public {
+        SelectiveRevertHook hook = new SelectiveRevertHook(ERC8183.claimRefund.selector);
+        vm.prank(deployer);
+        core.setHookWhitelist(address(hook), true);
+
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, _futureExpiry(), "hooked", address(hook), 0, "");
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TEN_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, address(usdc), TEN_USDC, "");
+
+        vm.warp(block.timestamp + 3601);
+
+        // Hook blocks the permissionless refund.
+        vm.expectRevert(bytes("blocked"));
+        core.claimRefund(jobId, "");
+        assertEq(usdc.balanceOf(address(core)), TEN_USDC);
+
+        // Break-glass: admin pauses and withdraws the escrow to the client, bypassing the hook.
+        uint256 balBefore = usdc.balanceOf(client);
+        vm.startPrank(deployer);
+        core.pause();
+        core.emergencyWithdraw(address(usdc), client, TEN_USDC);
+        vm.stopPrank();
+
+        assertEq(usdc.balanceOf(client), balBefore + TEN_USDC);
+        assertEq(usdc.balanceOf(address(core)), 0);
+    }
+
     // A contract client forwards the refund to the real beneficiary in its afterAction hook.
     // This is the intended reason the claimRefund hook is blocking.
     function test_claimRefund_contractClientForwardsRefundAtomically() public {

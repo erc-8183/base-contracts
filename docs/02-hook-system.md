@@ -70,11 +70,19 @@ signer; for the permissionless `claimRefund` it is `msg.sender` (whoever trigger
 > able to revert the whole refund — a failed forward must not strand funds in the intermediary.
 >
 > The accepted trade-off: as the permissionless recovery path, a buggy or fail-closed hook
-> that reverts on `claimRefund` can block the refund and lock escrowed funds. Mitigations:
-> hooks are admin-whitelisted and ERC-165-checked at attach time, and an admin can sever a
-> bad hook from in-flight jobs via `batchDetachHook` (after which `claimRefund` succeeds with
-> no callbacks). Only whitelist hooks you fully trust and have audited; deployments that don't
-> need contract-client forwarding and want an unconditional refund should attach no hook.
+> that reverts on `claimRefund` can block the refund and lock escrowed funds. This is handled
+> by a governance trust model:
+> - Hooks are admin-whitelisted only after an **audit confirming they do not block lifecycle
+>   paths** — a whitelisted hook MUST NOT revert on `claimRefund` except for a genuine forward
+>   failure, and MUST NOT derive routing/authorization from the caller-supplied `optParams`
+>   on this permissionless path (anyone can trigger `claimRefund`).
+> - **Break-glass recovery:** if a hook still blocks a refund, the admin can `pause()` and
+>   `emergencyWithdraw` the escrow regardless of any hook; `batchDetachHook` is the lighter
+>   option for a non-forwarding hook (after which `claimRefund` succeeds with no callbacks).
+>
+> Only whitelist hooks you fully trust and have audited. Deployments that don't need
+> contract-client forwarding and want an unconditional, trust-minimized refund should attach
+> no hook on such jobs.
 
 The forwarding flow, concretely (the `ForwardingClient` in the test suite demonstrates it):
 

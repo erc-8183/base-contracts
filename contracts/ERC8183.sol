@@ -920,11 +920,15 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     ///         revert to roll the whole refund back — this is required: a failed forward
     ///         MUST NOT leave funds stranded in the intermediary client contract.
     ///         Trade-off: this removes the unconditional post-expiry refund guarantee — a
-    ///         buggy/reverting hook can block the refund. Mitigations: hooks are
-    ///         admin-whitelisted and ERC-165-checked at attach time, and an admin can sever
-    ///         a hook from in-flight jobs via batchDetachHook (after which claimRefund
-    ///         proceeds with no callbacks). Deployments that need an unconditional refund
-    ///         guarantee should attach no hook (or a hook that never reverts on this path).
+    ///         buggy/reverting hook could otherwise block the refund. The trust model
+    ///         mitigates this: hooks are admin-whitelisted + ERC-165-checked at attach time
+    ///         and are expected to be audited as part of whitelisting to never block
+    ///         lifecycle paths (i.e. never revert on claimRefund except for a genuine
+    ///         forward failure) and to never derive routing/authorization from the
+    ///         caller-supplied optParams on this permissionless path. Break-glass recovery if
+    ///         a hook still blocks a refund: admin pause() + emergencyWithdraw moves the
+    ///         escrow out regardless of hooks; batchDetachHook is the lighter option for a
+    ///         non-forwarding hook (after which claimRefund proceeds with no callbacks).
     /// @param jobId The expired job to claim refund for
     /// @param optParams Hook-specific parameters (passed to before/after hooks)
     function claimRefund(uint256 jobId, bytes calldata optParams) external whenNotPaused nonReentrant {
