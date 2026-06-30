@@ -99,6 +99,8 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     mapping(uint256 => bytes32) public pendingClaimHash;
     /// @notice Job ID -> claim hash -> whether the claim hash has already been submitted.
     mapping(uint256 => mapping(bytes32 => bool)) public submittedClaimHash;
+    /// @dev Storage gap for future ERC8183 state variable additions without colliding with derived contracts.
+    uint256[50] private __gap;
 
     /// @notice Emitted when a new job is created
     event JobCreated(

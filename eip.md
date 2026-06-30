@@ -461,6 +461,7 @@ To support gasless execution — where a client, provider, or evaluator signs an
 
 - Each actor-authorized core function (including the claim-settlement functions, but excluding the permissionless `claimRefund`) SHALL have a `*WithAuthorization` variant accepting the original parameters plus an `Authorization { address signer; uint72 nonce; uint256 deadline; bytes sig; }`. The reference implementation wraps `createJob`'s parameters in a `CreateJobAuthorizationParams` struct to stay within stack limits.
 - Each action SHALL have a distinct EIP-712 typehash binding `signer`, all call parameters (dynamic values such as `description` and `optParams` bound by their `keccak256` hash), `nonce`, and `deadline`, so a signature for one action can never execute another.
+- `completeWithAuthorization` and `rejectWithAuthorization` SHALL additionally bind the job's stored `submittedAt` value in the signed payload. The value is `0` for an Open or Funded job that has not been submitted, and the actual stored timestamp for a Submitted job.
 - Nonces SHALL be unordered (random-nonce style, as in ERC-3009) and single-use across all action types. The reference implementation packs them as `bytes32((uint256(uint160(signer)) << 96) | uint256(nonce))` in a single used-nonce mapping.
 - The nonce SHALL be marked used before external signature verification, and verification SHALL support [ERC-1271](./eip-1271.md) contract signers in addition to EOAs.
 - Authorizations SHALL expire after `deadline`.
@@ -531,7 +532,7 @@ interface IERC8183 {
 }
 ```
 
-The Signed Authorizations extension adds, for each actor-authorized function above (all except the permissionless `claimRefund`), a `*WithAuthorization` variant taking the same parameters plus the `Authorization` struct below (`createJobWithAuthorization` wraps the job parameters in a `CreateJobAuthorizationParams` struct):
+The Signed Authorizations extension adds, for each actor-authorized function above (all except the permissionless `claimRefund`), a `*WithAuthorization` variant taking the same parameters plus the `Authorization` struct below. `completeWithAuthorization` and `rejectWithAuthorization` also bind the job's stored `submittedAt` value in the signed payload, and `createJobWithAuthorization` wraps the job parameters in a `CreateJobAuthorizationParams` struct:
 
 ```solidity
 struct Authorization {
@@ -555,7 +556,7 @@ function DOMAIN_SEPARATOR() external view returns (bytes32);
 - **Pending-claim refund blocking is bounded griefing:** a provider's pending claim blocks `claimRefund` on a Funded job past expiry, but on non-hooked jobs the client can always clear it with `rejectClaim` and refund in the next transaction. On hooked jobs a reverting `rejectClaim` hook can keep the claim pinned; clients accepting a hook accept this as part of the job's policy.
 - **Consumed claim hashes:** rejected or withdrawn claim tuples remain consumed, so a rejected claim cannot be silently refiled and later approved; a refile must visibly differ in `cumulativeAmount`, `deliverable`, or `optParams`.
 - **Authorization liveness:** a signed authorization is live until its deadline, use, or cancellation. `cancelAuthorization` remaining callable while paused is a deliberate incident-response property — pausing the contract must not trap signers with outstanding signatures.
-- **Terminal authorization context:** `completeWithAuthorization` and `rejectWithAuthorization` bind the action parameters, nonce, and deadline, but do not bind the submitted deliverable or a job-status snapshot. Evaluators SHOULD sign terminal authorizations only after observing the job state they intend to attest to: the submitted deliverable for completion, or the specific Funded/Submitted rejection context for rejection.
+- **Terminal authorization context:** `completeWithAuthorization` and `rejectWithAuthorization` bind the stored `submittedAt` value in addition to the action parameters, nonce, and deadline. This prevents a pre-signed terminal action for a non-submitted job (`submittedAt = 0`) from applying after the provider submits work, because the signed status snapshot no longer matches the stored job state.
 - No dispute resolution or arbitration; reject/expire is final.
 - Per-job payment tokens increase flexibility but also expand the attack surface; implementations SHOULD validate that payment token addresses are legitimate ERC-20 contracts (e.g. via an allowlist or registry check) to mitigate risks from malicious token contracts.
 - **Reentrancy:** Functions that transfer tokens SHALL be protected (e.g. reentrancy guard). Claim settlement transfers tokens mid-lifecycle (not only terminally), so effects-before-transfers ordering (update `settledAmount`, clear the pending claim, then transfer) is mandatory, not advisory.

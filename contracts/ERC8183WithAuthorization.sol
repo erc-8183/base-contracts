@@ -26,10 +26,10 @@ contract ERC8183WithAuthorization is ERC8183 {
         "SubmitAuthorization(address signer,uint256 jobId,bytes32 deliverable,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
     bytes32 public constant COMPLETE_AUTHORIZATION_TYPEHASH = keccak256(
-        "CompleteAuthorization(address signer,uint256 jobId,bytes32 reason,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
+        "CompleteAuthorization(address signer,uint256 jobId,uint48 submittedAt,bytes32 reason,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
     bytes32 public constant REJECT_AUTHORIZATION_TYPEHASH = keccak256(
-        "RejectAuthorization(address signer,uint256 jobId,bytes32 reason,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
+        "RejectAuthorization(address signer,uint256 jobId,uint48 submittedAt,bytes32 reason,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
     bytes32 public constant SUBMIT_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
         "SubmitClaimAuthorization(address signer,uint256 jobId,uint256 cumulativeAmount,bytes32 deliverable,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
@@ -46,6 +46,8 @@ contract ERC8183WithAuthorization is ERC8183 {
 
     /// @notice Tracks used packed nonces: uint160(signer) in the upper 160 bits, 24 zero padding bits, then uint72 nonce.
     mapping(bytes32 => bool) public authorizationNonceUsed;
+    /// @dev Storage gap for future ERC8183WithAuthorization state variable additions without colliding with derived contracts.
+    uint256[50] private __authorizationGap;
 
     struct Authorization {
         address signer;
@@ -267,12 +269,13 @@ contract ERC8183WithAuthorization is ERC8183 {
         bytes calldata optParams,
         Authorization calldata auth
     ) external whenNotPaused nonReentrant {
+        uint48 submittedAt = jobs[jobId].submittedAt;
         _verifyAuthorization(
             auth.signer,
             auth.nonce,
             auth.deadline,
             keccak256(
-                abi.encode(COMPLETE_AUTHORIZATION_TYPEHASH, auth.signer, jobId, reason, keccak256(optParams), auth.nonce, auth.deadline)
+                abi.encode(COMPLETE_AUTHORIZATION_TYPEHASH, auth.signer, jobId, submittedAt, reason, keccak256(optParams), auth.nonce, auth.deadline)
             ),
             auth.sig
         );
@@ -285,12 +288,13 @@ contract ERC8183WithAuthorization is ERC8183 {
         bytes calldata optParams,
         Authorization calldata auth
     ) external whenNotPaused nonReentrant {
+        uint48 submittedAt = jobs[jobId].submittedAt;
         _verifyAuthorization(
             auth.signer,
             auth.nonce,
             auth.deadline,
             keccak256(
-                abi.encode(REJECT_AUTHORIZATION_TYPEHASH, auth.signer, jobId, reason, keccak256(optParams), auth.nonce, auth.deadline)
+                abi.encode(REJECT_AUTHORIZATION_TYPEHASH, auth.signer, jobId, submittedAt, reason, keccak256(optParams), auth.nonce, auth.deadline)
             ),
             auth.sig
         );

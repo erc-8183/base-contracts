@@ -39,10 +39,10 @@ contract ERC8183WithAuthorizationTest is Test {
         "SubmitAuthorization(address signer,uint256 jobId,bytes32 deliverable,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
     bytes32 constant COMPLETE_AUTHORIZATION_TYPEHASH = keccak256(
-        "CompleteAuthorization(address signer,uint256 jobId,bytes32 reason,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
+        "CompleteAuthorization(address signer,uint256 jobId,uint48 submittedAt,bytes32 reason,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
     bytes32 constant REJECT_AUTHORIZATION_TYPEHASH = keccak256(
-        "RejectAuthorization(address signer,uint256 jobId,bytes32 reason,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
+        "RejectAuthorization(address signer,uint256 jobId,uint48 submittedAt,bytes32 reason,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
     bytes32 constant SUBMIT_CLAIM_AUTHORIZATION_TYPEHASH = keccak256(
         "SubmitClaimAuthorization(address signer,uint256 jobId,uint256 cumulativeAmount,bytes32 deliverable,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
@@ -352,6 +352,7 @@ contract ERC8183WithAuthorizationTest is Test {
         uint256 signerPk,
         address signer,
         uint256 jobId,
+        uint48 submittedAt,
         bytes32 reason,
         bytes memory optParams,
         uint72 nonce,
@@ -361,7 +362,14 @@ contract ERC8183WithAuthorizationTest is Test {
             signerPk,
             keccak256(
                 abi.encode(
-                    COMPLETE_AUTHORIZATION_TYPEHASH, signer, jobId, reason, _hashBytes(optParams), nonce, deadline
+                    COMPLETE_AUTHORIZATION_TYPEHASH,
+                    signer,
+                    jobId,
+                    submittedAt,
+                    reason,
+                    _hashBytes(optParams),
+                    nonce,
+                    deadline
                 )
             )
         );
@@ -371,6 +379,7 @@ contract ERC8183WithAuthorizationTest is Test {
         uint256 signerPk,
         address signer,
         uint256 jobId,
+        uint48 submittedAt,
         bytes32 reason,
         bytes memory optParams,
         uint72 nonce,
@@ -383,6 +392,7 @@ contract ERC8183WithAuthorizationTest is Test {
                     REJECT_AUTHORIZATION_TYPEHASH,
                     signer,
                     jobId,
+                    submittedAt,
                     reason,
                     _hashBytes(optParams),
                     nonce,
@@ -550,7 +560,8 @@ contract ERC8183WithAuthorizationTest is Test {
     }
 
     function _relayComplete(uint256 jobId, bytes32 reason, uint72 nonce, uint256 deadline) internal {
-        bytes memory sig = _signComplete(evaluatorPk, evaluator, jobId, reason, "", nonce, deadline);
+        uint48 submittedAt = core.getJob(jobId).submittedAt;
+        bytes memory sig = _signComplete(evaluatorPk, evaluator, jobId, submittedAt, reason, "", nonce, deadline);
         vm.prank(relayer);
         core.completeWithAuthorization(jobId, reason, "", _auth(evaluator, nonce, deadline, sig));
     }
@@ -562,6 +573,7 @@ contract ERC8183WithAuthorizationTest is Test {
     function test_claimAuthorizationTypehashesArePublic() public view {
         _assertPublicTypehash("SET_PROVIDER_AUTHORIZATION_TYPEHASH()", SET_PROVIDER_AUTHORIZATION_TYPEHASH);
         _assertPublicTypehash("FUND_AUTHORIZATION_TYPEHASH()", FUND_AUTHORIZATION_TYPEHASH);
+        _assertPublicTypehash("COMPLETE_AUTHORIZATION_TYPEHASH()", COMPLETE_AUTHORIZATION_TYPEHASH);
         _assertPublicTypehash("REJECT_AUTHORIZATION_TYPEHASH()", REJECT_AUTHORIZATION_TYPEHASH);
         _assertPublicTypehash("SUBMIT_CLAIM_AUTHORIZATION_TYPEHASH()", SUBMIT_CLAIM_AUTHORIZATION_TYPEHASH);
         _assertPublicTypehash("SETTLE_CLAIM_AUTHORIZATION_TYPEHASH()", SETTLE_CLAIM_AUTHORIZATION_TYPEHASH);
@@ -619,6 +631,27 @@ contract ERC8183WithAuthorizationTest is Test {
 
         assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Completed));
         assertEq(usdc.balanceOf(provider), TWENTY_USDC);
+    }
+
+    function test_completeWithAuthorization_RevertsWhenSignedBeforeSubmission() public {
+        uint256 jobId = _createFundedJob();
+        uint256 deadline = _deadline();
+        bytes32 reason = bytes32("approved");
+        uint72 nonce = 67;
+
+        bytes memory sig = _signComplete(evaluatorPk, evaluator, jobId, 0, reason, "", nonce, deadline);
+
+        vm.prank(provider);
+        core.submit(jobId, bytes32("submitted-work"), "");
+        assertGt(core.getJob(jobId).submittedAt, 0);
+
+        vm.expectRevert(ERC8183WithAuthorization.InvalidAuthorizationSignature.selector);
+        vm.prank(relayer);
+        core.completeWithAuthorization(jobId, reason, "", _auth(evaluator, nonce, deadline, sig));
+
+        assertFalse(core.authorizationNonceUsed(_packNonce(evaluator, nonce)));
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Submitted));
+        assertEq(usdc.balanceOf(provider), 0);
     }
 
     function test_fundWithAuthorization_RevertsWhenPaymentTokenChangesAfterSigning() public {
@@ -822,7 +855,8 @@ contract ERC8183WithAuthorizationTest is Test {
         uint256 jobId = _createFundedJob();
         uint256 deadline = _deadline();
         bytes32 reason = "rejected";
-        bytes memory sig = _signReject(evaluatorPk, evaluator, jobId, reason, "", 62, deadline);
+        uint48 submittedAt = core.getJob(jobId).submittedAt;
+        bytes memory sig = _signReject(evaluatorPk, evaluator, jobId, submittedAt, reason, "", 62, deadline);
 
         vm.expectEmit(true, true, true, true, address(core));
         emit AuthorizationUsed(evaluator, _packNonce(evaluator, 62));
@@ -833,6 +867,27 @@ contract ERC8183WithAuthorizationTest is Test {
         assertEq(usdc.balanceOf(client), TWENTY_USDC);
         assertEq(usdc.balanceOf(address(core)), 0);
         assertTrue(core.authorizationNonceUsed(_packNonce(evaluator, 62)));
+    }
+
+    function test_rejectWithAuthorization_RevertsWhenSignedBeforeSubmission() public {
+        uint256 jobId = _createFundedJob();
+        uint256 deadline = _deadline();
+        bytes32 reason = "rejected";
+        uint72 nonce = 68;
+
+        bytes memory sig = _signReject(evaluatorPk, evaluator, jobId, 0, reason, "", nonce, deadline);
+
+        vm.prank(provider);
+        core.submit(jobId, bytes32("submitted-work"), "");
+        assertGt(core.getJob(jobId).submittedAt, 0);
+
+        vm.expectRevert(ERC8183WithAuthorization.InvalidAuthorizationSignature.selector);
+        vm.prank(relayer);
+        core.rejectWithAuthorization(jobId, reason, "", _auth(evaluator, nonce, deadline, sig));
+
+        assertFalse(core.authorizationNonceUsed(_packNonce(evaluator, nonce)));
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Submitted));
+        assertEq(usdc.balanceOf(address(core)), TWENTY_USDC);
     }
 
     function test_relaysProviderAuthorizedClaimIntoPendingStateAndApproval() public {
@@ -991,6 +1046,31 @@ contract ERC8183WithAuthorizationTest is Test {
             _auth(client, tamperedNonce, deadline, tamperedSig)
         );
         assertFalse(core.authorizationNonceUsed(_packNonce(client, tamperedNonce)));
+    }
+
+    function test_authorizationNonceStorageStartsAfterBaseGap() public {
+        uint48 expiry = _futureExpiry();
+        uint256 deadline = _deadline();
+        uint72 nonce = 72;
+        bytes32 packed = _packNonce(client, nonce);
+        string memory description = "storage gap";
+        ERC8183WithAuthorization.CreateJobAuthorizationParams memory params =
+            _createParams(provider, evaluator, expiry, description, address(0), 0);
+        bytes memory sig =
+            _signCreateJob(clientPk, client, provider, evaluator, expiry, description, address(0), 0, nonce, deadline);
+
+        vm.prank(relayer);
+        core.createJobWithAuthorization(params, _auth(client, nonce, deadline, sig));
+
+        assertTrue(core.authorizationNonceUsed(packed));
+
+        bytes32 oldSlot = keccak256(abi.encode(packed, uint256(9)));
+        bytes32 gapProtectedSlot = keccak256(abi.encode(packed, uint256(59)));
+
+        assertEq(vm.load(address(core), oldSlot), bytes32(0));
+        assertEq(vm.load(address(core), gapProtectedSlot), bytes32(uint256(1)));
+        assertEq(vm.load(address(core), bytes32(uint256(60))), bytes32(0));
+        assertEq(vm.load(address(core), bytes32(uint256(109))), bytes32(0));
     }
 
     function test_reservesPackedNonceBeforeERC1271SignatureValidation() public {
