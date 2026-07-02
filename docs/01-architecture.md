@@ -101,8 +101,10 @@ sequenceDiagram
     participant P as Provider
     participant E as Evaluator
 
-    C->>AC: createJob(provider, evaluator, expiry, desc, hook, agentId)
-    Note over AC: Status: Open (hook stored, no callback)
+    C->>AC: createJob(provider, evaluator, expiry, desc, hook, agentId, optParams)
+    Note over AC: Status: Open (hook attached)
+    AC->>H: afterAction(jobId, createJob.selector, data)
+    Note over H: CAN revert to reject the job (no beforeAction on creation)
 
     P->>AC: setBudget(jobId, token, amount, optParams)
     AC->>H: beforeAction(jobId, setBudget.selector, data)
