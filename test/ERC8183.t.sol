@@ -1629,7 +1629,7 @@ contract ERC8183Test is Test {
         uint256 balBefore = usdc.balanceOf(client);
         vm.startPrank(deployer);
         core.pause();
-        core.forceRefund(jobId);
+        core.forceRefund(jobId, address(0));
         vm.stopPrank();
 
         assertEq(usdc.balanceOf(client), balBefore + TEN_USDC);
@@ -1656,7 +1656,7 @@ contract ERC8183Test is Test {
 
         vm.startPrank(deployer);
         core.pause();
-        core.forceRefund(jobId);
+        core.forceRefund(jobId, address(0));
         core.unpause();
 
         // Even after the hook is detached, the permissionless path cannot pay again.
@@ -1669,13 +1669,41 @@ contract ERC8183Test is Test {
         core.claimRefund(jobId, "");
     }
 
+    // The destination override: when job.client is an intermediary contract whose (blocked)
+    // forwarding hook was the only way funds could move onward, the admin can pay the
+    // ultimate beneficiary directly instead of re-stranding the refund in the intermediary.
+    function test_forceRefund_canRedirectToChosenRecipient() public {
+        SelectiveRevertHook hook = new SelectiveRevertHook(ERC8183.claimRefund.selector);
+        vm.prank(deployer);
+        core.setHookWhitelist(address(hook), true);
+
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, _futureExpiry(), "hooked", address(hook), 0, "");
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TEN_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, address(usdc), TEN_USDC, "");
+
+        vm.warp(block.timestamp + 3601);
+
+        address beneficiary = makeAddr("ultimateBeneficiary");
+        vm.startPrank(deployer);
+        core.pause();
+        core.forceRefund(jobId, beneficiary);
+        vm.stopPrank();
+
+        assertEq(usdc.balanceOf(beneficiary), TEN_USDC);
+        assertEq(usdc.balanceOf(address(core)), 0);
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Expired));
+    }
+
     function test_forceRefund_revertsWhenNotPaused() public {
         uint256 jobId = _createFundedJob(TEN_USDC);
         vm.warp(block.timestamp + 3601);
 
         vm.prank(deployer);
         vm.expectRevert(PausableUpgradeable.ExpectedPause.selector);
-        core.forceRefund(jobId);
+        core.forceRefund(jobId, address(0));
     }
 
     function test_forceRefund_revertsForNonAdmin() public {
@@ -1687,7 +1715,7 @@ contract ERC8183Test is Test {
 
         vm.prank(client);
         vm.expectRevert();
-        core.forceRefund(jobId);
+        core.forceRefund(jobId, address(0));
     }
 
     // forceRefund grants no power beyond claimRefund's eligibility: pre-expiry jobs cannot be
@@ -1698,7 +1726,7 @@ contract ERC8183Test is Test {
         vm.startPrank(deployer);
         core.pause();
         vm.expectRevert(ERC8183.WrongStatus.selector);
-        core.forceRefund(jobId);
+        core.forceRefund(jobId, address(0));
         vm.stopPrank();
     }
 

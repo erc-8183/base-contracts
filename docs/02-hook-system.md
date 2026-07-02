@@ -78,7 +78,10 @@ signer; for the permissionless `claimRefund` it is `msg.sender` (whoever trigger
 >   on this permissionless path (anyone can trigger `claimRefund`).
 > - **Break-glass recovery:** if a hook still blocks a refund, the admin can `pause()` and
 >   `forceRefund` the job — same eligibility as `claimRefund` but with hook callbacks skipped,
->   refunding the client and expiring the job atomically (so it can never be refunded twice);
+>   paying the refund and expiring the job atomically (so it can never be refunded twice). The
+>   recipient defaults to the client but can be overridden: a contract-client that depended on
+>   its now-blocked hook to forward funds may be unable to receive them, and paying it would
+>   re-strand the refund (the override adds no power the admin lacks via `emergencyWithdraw`);
 >   `batchDetachHook` is the lighter option for a non-forwarding hook (after which
 >   `claimRefund` succeeds with no callbacks). `emergencyWithdraw` is reserved for funds not
 >   attributed to any job (e.g. stray transfers) — it moves tokens without closing a job's

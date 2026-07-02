@@ -941,23 +941,30 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         bytes memory data = abi.encode(msg.sender, optParams);
         _beforeHook(job.hook, jobId, this.claimRefund.selector, data);
 
-        _expireWithRefund(jobId, job);
+        _expireWithRefund(jobId, job, job.client);
 
         _afterHook(job.hook, jobId, this.claimRefund.selector, data);
     }
 
     /// @notice Admin break-glass: refunds and expires a job whose hook blocks claimRefund,
     ///         bypassing hook callbacks. Requires the contract to be paused.
-    /// @dev    Grants no power beyond the permissionless path: eligibility is exactly
-    ///         claimRefund's (post-expiry, grace period elapsed for Submitted, pending claims
-    ///         still block) — only the hook calls are skipped. Because the job transitions to
-    ///         Expired atomically with the payout, a rescued job can never be refunded again,
-    ///         which is why this MUST be used instead of emergencyWithdraw for job-tied funds
-    ///         (emergencyWithdraw moves tokens without closing the job's ledger entry).
+    /// @dev    Grants no state-transition power beyond the permissionless path: eligibility is
+    ///         exactly claimRefund's (post-expiry, grace period elapsed for Submitted, pending
+    ///         claims still block) — only the hook calls are skipped. Because the job
+    ///         transitions to Expired atomically with the payout, a rescued job can never be
+    ///         refunded again, which is why this MUST be used instead of emergencyWithdraw for
+    ///         job-tied funds (emergencyWithdraw moves tokens without closing the job's
+    ///         ledger entry).
+    ///         The destination override exists because job.client may itself be an
+    ///         intermediary contract (smart account, router) that cannot receive or forward
+    ///         funds without its — now blocked — hook: paying it would re-strand the refund
+    ///         outside the escrow's reach. This grants no destination power the admin does
+    ///         not already hold via emergencyWithdraw's free-form (token, to, amount).
     /// @param jobId The expired job to rescue
-    function forceRefund(uint256 jobId) external onlyRole(ADMIN_ROLE) whenPaused nonReentrant {
+    /// @param to Refund recipient; address(0) defaults to job.client
+    function forceRefund(uint256 jobId, address to) external onlyRole(ADMIN_ROLE) whenPaused nonReentrant {
         Job storage job = _validateRefundEligibility(jobId);
-        _expireWithRefund(jobId, job);
+        _expireWithRefund(jobId, job, to == address(0) ? job.client : to);
     }
 
     /// @dev Shared eligibility checks for claimRefund/forceRefund.
@@ -977,15 +984,15 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     }
 
     /// @dev Shared state transition for claimRefund/forceRefund: expire the job and pay the
-    ///      unsettled remainder to the client.
-    function _expireWithRefund(uint256 jobId, Job storage job) internal {
+    ///      unsettled remainder to `recipient` (always job.client on the permissionless path).
+    function _expireWithRefund(uint256 jobId, Job storage job, address recipient) internal {
         JobStatus prev = job.status;
         job.status = JobStatus.Expired;
 
         uint256 refundAmount = job.budget - job.settledAmount;
         if (refundAmount > 0 && (prev == JobStatus.Funded || prev == JobStatus.Submitted)) {
-            IERC20(job.paymentToken).safeTransfer(job.client, refundAmount);
-            emit Refunded(jobId, job.client, refundAmount);
+            IERC20(job.paymentToken).safeTransfer(recipient, refundAmount);
+            emit Refunded(jobId, recipient, refundAmount);
         }
 
         emit JobExpired(jobId);
