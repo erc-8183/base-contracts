@@ -77,8 +77,12 @@ signer; for the permissionless `claimRefund` it is `msg.sender` (whoever trigger
 >   failure, and MUST NOT derive routing/authorization from the caller-supplied `optParams`
 >   on this permissionless path (anyone can trigger `claimRefund`).
 > - **Break-glass recovery:** if a hook still blocks a refund, the admin can `pause()` and
->   `emergencyWithdraw` the escrow regardless of any hook; `batchDetachHook` is the lighter
->   option for a non-forwarding hook (after which `claimRefund` succeeds with no callbacks).
+>   `forceRefund` the job — same eligibility as `claimRefund` but with hook callbacks skipped,
+>   refunding the client and expiring the job atomically (so it can never be refunded twice);
+>   `batchDetachHook` is the lighter option for a non-forwarding hook (after which
+>   `claimRefund` succeeds with no callbacks). `emergencyWithdraw` is reserved for funds not
+>   attributed to any job (e.g. stray transfers) — it moves tokens without closing a job's
+>   ledger entry, so it MUST NOT be used for job-tied refunds.
 >
 > Only whitelist hooks you fully trust and have audited. Deployments that don't need
 > contract-client forwarding and want an unconditional, trust-minimized refund should attach
