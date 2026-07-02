@@ -70,21 +70,6 @@ contract RecordingHook is IERC8183Hook {
     }
 }
 
-/// @notice Reverts on every callback — used to prove hooks can gate transitions.
-contract RevertingHook is IERC8183Hook {
-    function beforeAction(uint256, bytes4, bytes calldata) external pure override {
-        revert("blocked");
-    }
-
-    function afterAction(uint256, bytes4, bytes calldata) external pure override {
-        revert("blocked");
-    }
-
-    function supportsInterface(bytes4 id) external pure override returns (bool) {
-        return id == type(IERC8183Hook).interfaceId || id == type(IERC165).interfaceId;
-    }
-}
-
 /// @notice Reverts only on a single configured selector — lets other lifecycle calls
 ///         (e.g. createJob/setBudget/fund) proceed while gating one specific action.
 contract SelectiveRevertHook is IERC8183Hook {
@@ -1072,7 +1057,7 @@ contract ERC8183Test is Test {
 
     // a reverting afterAction rejects job creation entirely
     function test_createJob_afterHookRevertRejectsCreation() public {
-        RevertingHook hook = new RevertingHook();
+        SelectiveRevertHook hook = new SelectiveRevertHook(ERC8183.createJob.selector);
         vm.prank(deployer);
         core.setHookWhitelist(address(hook), true);
 
