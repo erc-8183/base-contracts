@@ -6,6 +6,7 @@ import {Vm} from "forge-std/Vm.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
 import {ERC8183} from "../contracts/ERC8183.sol";
 import {IERC8183Hook} from "../contracts/IERC8183Hook.sol";
@@ -1602,9 +1603,10 @@ contract ERC8183Test is Test {
         assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Expired));
     }
 
-    // Break-glass: if a hook blocks the refund, admin pause() + emergencyWithdraw recovers the
-    // escrow regardless of the hook. This is the governance backstop for refund liveness.
-    function test_claimRefund_blockedByHook_adminEmergencyWithdrawRecovers() public {
+    // Break-glass: if a hook blocks the refund, admin pause() + forceRefund pays the client
+    // and expires the job in one step, bypassing the hook. This is the governance backstop
+    // for refund liveness.
+    function test_claimRefund_blockedByHook_adminForceRefundRecovers() public {
         SelectiveRevertHook hook = new SelectiveRevertHook(ERC8183.claimRefund.selector);
         vm.prank(deployer);
         core.setHookWhitelist(address(hook), true);
@@ -1623,15 +1625,81 @@ contract ERC8183Test is Test {
         core.claimRefund(jobId, "");
         assertEq(usdc.balanceOf(address(core)), TEN_USDC);
 
-        // Break-glass: admin pauses and withdraws the escrow to the client, bypassing the hook.
+        // Break-glass: admin pauses and force-refunds the job, bypassing the hook.
         uint256 balBefore = usdc.balanceOf(client);
         vm.startPrank(deployer);
         core.pause();
-        core.emergencyWithdraw(address(usdc), client, TEN_USDC);
+        core.forceRefund(jobId);
         vm.stopPrank();
 
         assertEq(usdc.balanceOf(client), balBefore + TEN_USDC);
         assertEq(usdc.balanceOf(address(core)), 0);
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Expired));
+    }
+
+    // Regression: a rescued job can never be refunded a second time — forceRefund expires the
+    // job atomically with the payout, so a later hook detach + claimRefund cannot double-pay
+    // out of other jobs' escrow.
+    function test_forceRefund_rescuedJobCannotBeRefundedAgain() public {
+        SelectiveRevertHook hook = new SelectiveRevertHook(ERC8183.claimRefund.selector);
+        vm.prank(deployer);
+        core.setHookWhitelist(address(hook), true);
+
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, _futureExpiry(), "hooked", address(hook), 0, "");
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TEN_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, address(usdc), TEN_USDC, "");
+
+        vm.warp(block.timestamp + 3601);
+
+        vm.startPrank(deployer);
+        core.pause();
+        core.forceRefund(jobId);
+        core.unpause();
+
+        // Even after the hook is detached, the permissionless path cannot pay again.
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = jobId;
+        core.batchDetachHook(ids);
+        vm.stopPrank();
+
+        vm.expectRevert(ERC8183.WrongStatus.selector);
+        core.claimRefund(jobId, "");
+    }
+
+    function test_forceRefund_revertsWhenNotPaused() public {
+        uint256 jobId = _createFundedJob(TEN_USDC);
+        vm.warp(block.timestamp + 3601);
+
+        vm.prank(deployer);
+        vm.expectRevert(PausableUpgradeable.ExpectedPause.selector);
+        core.forceRefund(jobId);
+    }
+
+    function test_forceRefund_revertsForNonAdmin() public {
+        uint256 jobId = _createFundedJob(TEN_USDC);
+        vm.warp(block.timestamp + 3601);
+
+        vm.prank(deployer);
+        core.pause();
+
+        vm.prank(client);
+        vm.expectRevert();
+        core.forceRefund(jobId);
+    }
+
+    // forceRefund grants no power beyond claimRefund's eligibility: pre-expiry jobs cannot be
+    // force-expired by the admin.
+    function test_forceRefund_revertsBeforeExpiry() public {
+        uint256 jobId = _createFundedJob(TEN_USDC);
+
+        vm.startPrank(deployer);
+        core.pause();
+        vm.expectRevert(ERC8183.WrongStatus.selector);
+        core.forceRefund(jobId);
+        vm.stopPrank();
     }
 
     // A contract client forwards the refund to the real beneficiary in its afterAction hook.

@@ -928,13 +928,41 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     ///         lifecycle paths (i.e. never revert on claimRefund except for a genuine
     ///         forward failure) and to never derive routing/authorization from the
     ///         caller-supplied optParams on this permissionless path. Break-glass recovery if
-    ///         a hook still blocks a refund: admin pause() + emergencyWithdraw moves the
-    ///         escrow out regardless of hooks; batchDetachHook is the lighter option for a
-    ///         non-forwarding hook (after which claimRefund proceeds with no callbacks).
+    ///         a hook still blocks a refund: batchDetachHook for a non-forwarding hook (after
+    ///         which claimRefund proceeds with no callbacks), or admin forceRefund, which
+    ///         refunds and expires the job in one step while bypassing hooks. emergencyWithdraw
+    ///         is reserved for funds NOT attributed to any job (e.g. stray transfers) — using
+    ///         it for a job-tied refund leaves the job Funded and refundable a second time.
     /// @param jobId The expired job to claim refund for
     /// @param optParams Hook-specific parameters (passed to before/after hooks)
     function claimRefund(uint256 jobId, bytes calldata optParams) external whenNotPaused nonReentrant {
-        Job storage job = jobs[jobId];
+        Job storage job = _validateRefundEligibility(jobId);
+
+        bytes memory data = abi.encode(msg.sender, optParams);
+        _beforeHook(job.hook, jobId, this.claimRefund.selector, data);
+
+        _expireWithRefund(jobId, job);
+
+        _afterHook(job.hook, jobId, this.claimRefund.selector, data);
+    }
+
+    /// @notice Admin break-glass: refunds and expires a job whose hook blocks claimRefund,
+    ///         bypassing hook callbacks. Requires the contract to be paused.
+    /// @dev    Grants no power beyond the permissionless path: eligibility is exactly
+    ///         claimRefund's (post-expiry, grace period elapsed for Submitted, pending claims
+    ///         still block) — only the hook calls are skipped. Because the job transitions to
+    ///         Expired atomically with the payout, a rescued job can never be refunded again,
+    ///         which is why this MUST be used instead of emergencyWithdraw for job-tied funds
+    ///         (emergencyWithdraw moves tokens without closing the job's ledger entry).
+    /// @param jobId The expired job to rescue
+    function forceRefund(uint256 jobId) external onlyRole(ADMIN_ROLE) whenPaused nonReentrant {
+        Job storage job = _validateRefundEligibility(jobId);
+        _expireWithRefund(jobId, job);
+    }
+
+    /// @dev Shared eligibility checks for claimRefund/forceRefund.
+    function _validateRefundEligibility(uint256 jobId) internal view returns (Job storage job) {
+        job = jobs[jobId];
         if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Open && job.status != JobStatus.Funded && job.status != JobStatus.Submitted)
             revert WrongStatus();
@@ -946,10 +974,11 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         } else {
             if (block.timestamp < job.expiredAt) revert WrongStatus();
         }
+    }
 
-        bytes memory data = abi.encode(msg.sender, optParams);
-        _beforeHook(job.hook, jobId, this.claimRefund.selector, data);
-
+    /// @dev Shared state transition for claimRefund/forceRefund: expire the job and pay the
+    ///      unsettled remainder to the client.
+    function _expireWithRefund(uint256 jobId, Job storage job) internal {
         JobStatus prev = job.status;
         job.status = JobStatus.Expired;
 
@@ -960,8 +989,6 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         }
 
         emit JobExpired(jobId);
-
-        _afterHook(job.hook, jobId, this.claimRefund.selector, data);
     }
 
     function _distributeSettlement(
