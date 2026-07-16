@@ -184,10 +184,10 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         address indexed evaluator,
         uint256 amount
     );
-    /// @notice Emitted when escrowed funds are returned to the client
+    /// @notice Emitted when escrowed funds are refunded; recipient is the client except under a forceRefund destination override
     event Refunded(
         uint256 indexed jobId,
-        address indexed client,
+        address indexed recipient,
         uint256 amount
     );
     /// @notice Emitted alongside Refunded when forceRefund pays out, attributing the admin
