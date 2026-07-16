@@ -70,8 +70,9 @@ Each job SHALL have at least:
 - `client`, `provider`, `evaluator` (addresses). **Provider MAY be zero at creation** (see [Optional provider](#optional-provider-set-later) below).
 - `description` (string) — set at creation (e.g. job brief, scope reference).
 - `budget` (uint256)
-- `expiredAt` (uint256 timestamp)
+- `expiredAt` (uint48 timestamp)
 - `status` (Open | Funded | Submitted | Completed | Rejected | Expired)
+- `submittedAt` (uint48 timestamp) — OPTIONAL for the core protocol; SHOULD be recorded on `submit` for grace-period accounting, REQUIRED when implementing Signed Authorizations (which bind it). Default `0` (not submitted).
 - `paymentToken` (address) — the [ERC-20](./eip-20.md) token used for payment on this job, set via `setBudget`.
 - `hook` (address) — OPTIONAL. External hook contract called before and after core functions (see [Hooks](#hooks-optional) below). MAY be `address(0)` (no hook).
 - `payoutReceiver` (address) — OPTIONAL. Provider-managed payout recipient. MAY be `address(0)` to pay the provider directly. Set via `setPayoutReceiver`.
@@ -502,7 +503,7 @@ interface IERC8183Hook is IERC165 {
 ### IDisburser.sol
 
 ```solidity
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.28;
 
 import "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 
