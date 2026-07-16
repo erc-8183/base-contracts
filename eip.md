@@ -132,9 +132,9 @@ Callable by anyone when status is Open, Funded, or Submitted. SHALL revert if st
 > do not need contract-client forwarding SHOULD attach no hook (or a hook that never reverts
 > on the `claimRefund` selector) so the refund stays unconditional.
 
-### Claim Settlement
+#### Claim Settlement
 
-While a job is Funded, escrow MAY be released incrementally through **claim settlement**, ahead of (or instead of) terminal completion. Two settlement paths share one ledger:
+While a job is Funded, escrow MAY be released incrementally through **claim settlement**, ahead of (or instead of) terminal completion. The four claim-settlement functions are core entry points like the lifecycle functions above; they are specified together because two settlement paths share one ledger:
 
 - the **client-initiated path**: the client unilaterally settles an amount to the provider (`settleClaim`);
 - the **provider-initiated path**: the provider files a pending claim (`submitClaim`) which the client or evaluator approves (`approveClaim`) or any of the three parties rejects (`rejectClaim`).
@@ -152,7 +152,7 @@ Called by **client or evaluator**. SHALL revert if the job is not Funded, no cla
 - **rejectClaim(jobId, cumulativeAmount, deliverable, reason, optParams?)**
 Called by **client, evaluator, or provider** (the provider withdrawing their own stale claim, e.g. to file a corrected one). SHALL revert if the job is not Funded, no claim is pending, or the arguments do not exactly match the pending claim. SHALL consume the pending claim without moving funds. The consumed claim tuple SHALL remain unfilable — a corrected claim must differ in `cumulativeAmount`, `deliverable`, or `optParams`. SHALL emit ClaimRejected. `optParams` forwarded to hook if set.
 
-#### Claim interactions
+##### Claim interactions
 
 - **submit** SHALL supersede any pending claim — the provider is electing the full-completion path for the entire remainder — and SHOULD emit ClaimRejected with a supersession reason so hooks and indexers observe a closed claim lifecycle.
 - **complete** requires no supersession logic: claims can only be filed while the job is Funded, and `complete` is callable only once the job is Submitted — by which point `submit` has already superseded any pending claim, so `complete` can never encounter one.
@@ -460,7 +460,7 @@ To support gasless execution — where a client, provider, or evaluator signs an
 
 **Implementation requirements:**
 
-- Each actor-authorized core function (including the claim-settlement functions, but excluding the permissionless `claimRefund`) SHALL have a `*WithAuthorization` variant accepting the original parameters plus an `Authorization { address signer; uint72 nonce; uint256 deadline; bytes sig; }`. The reference implementation wraps `createJob`'s parameters in a `CreateJobAuthorizationParams` struct to stay within stack limits.
+- Each actor-authorized core function (all except the permissionless `claimRefund`) SHALL have a `*WithAuthorization` variant accepting the original parameters plus an `Authorization { address signer; uint72 nonce; uint256 deadline; bytes sig; }`. The reference implementation wraps `createJob`'s parameters in a `CreateJobAuthorizationParams` struct to stay within stack limits.
 - Each action SHALL have a distinct EIP-712 typehash binding `signer`, all call parameters (dynamic values such as `description` and `optParams` bound by their `keccak256` hash), `nonce`, and `deadline`, so a signature for one action can never execute another.
 - `completeWithAuthorization` and `rejectWithAuthorization` SHALL additionally bind the job's stored `submittedAt` value in the signed payload. The value is `0` for an Open or Funded job that has not been submitted, and the actual stored timestamp for a Submitted job.
 - Nonces SHALL be unordered (random-nonce style, as in ERC-3009) and single-use across all action types. The reference implementation packs them as `bytes32((uint256(uint160(signer)) << 96) | uint256(nonce))` in a single used-nonce mapping.
