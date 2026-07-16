@@ -78,11 +78,11 @@ sequenceDiagram
         Note over AC: pending claim hash stored
         C->>AC: approveClaim(jobId, cumulativeAmount, deliverable, optParams)
         Note over AC: 💸 delta released through payout receiver
-        AC-->>R: transfer(net); optional onDisbursement(..., approveClaim.selector, ...)
+        AC-->>R: transfer(net) + optional onDisbursement(..., approveClaim.selector, ...)
     else Fast path: client-authorized settlement
         C->>AC: settleClaim(jobId, cumulativeAmount, deliverable, optParams)
         Note over AC: 💸 delta released immediately through payout receiver
-        AC-->>R: transfer(net); optional onDisbursement(..., settleClaim.selector, ...)
+        AC-->>R: transfer(net) + optional onDisbursement(..., settleClaim.selector, ...)
     end
 
     Note over C,AC: Relayed fast path: client signs SettleClaimAuthorization,<br/>relayer calls settleClaimWithAuthorization(...)
@@ -148,9 +148,9 @@ sequenceDiagram
     participant R as PayoutReceiver
 
     C->>AC: createJob(..., hook, agentId)
-    Note over AC: payoutReceiver defaults to address(0); pays provider
+    Note over AC: payoutReceiver defaults to address(0), pays provider
     P->>AC: setPayoutReceiver(jobId, newReceiver)
-    Note over AC: provider-only, Open only; locked once Funded
+    Note over AC: provider-only while Open, locked once Funded
     P->>AC: setBudget(jobId, token, amount, "0x")
     C->>AC: fund(jobId, expectedToken, expectedBudget, "0x")
     Note over AC: Status: Funded
@@ -158,7 +158,7 @@ sequenceDiagram
     alt Provider claim settlement
         P->>AC: submitClaim(jobId, amount, deliverable, optParams)
         E->>AC: approveClaim(jobId, amount, deliverable, optParams)
-        Note over AC: Pending claim approved;<br/>delta released through payout receiver
+        Note over AC: Pending claim approved,<br/>delta released through payout receiver
     else Fast client settlement
         C->>AC: settleClaim(jobId, amount, deliverable, optParams)
         Note over AC: Delta released immediately through payout receiver

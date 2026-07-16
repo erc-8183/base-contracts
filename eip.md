@@ -32,7 +32,7 @@ A **job** has exactly one of six states:
 
 | State         | Meaning                                                                                                           |
 | ------------- | ----------------------------------------------------------------------------------------------------------------- |
-| **Open**      | Created; budget not yet set or not yet funded. Client may set budget, then fund or reject.                        |
+| **Open**      | Created; budget not yet set or not yet funded. Provider may propose a budget via `setBudget`; client may then fund, and either party may reject. |
 | **Funded**    | Budget escrowed. Provider may submit work or file a settlement claim; client may settle partial amounts directly or approve/reject a pending claim; evaluator may approve/reject a pending claim or reject the job. After `expiredAt`, anyone may trigger refund of the unsettled remainder (`budget - settledAmount`, see [Job Data](#job-data)), provided no claim is pending. |
 | **Submitted** | Provider has submitted work. Only evaluator may complete or reject. After `expiredAt + EVALUATION_GRACE_PERIOD`, anyone may trigger refund. |
 | **Completed** | Terminal. Unsettled remainder released to provider (minus optional fees).                                         |
@@ -45,6 +45,7 @@ Allowed transitions:
 - **Open → Funded**: Provider calls `setBudget(jobId, token, amount)` to propose the price and payment token, then client accepts by calling `fund(jobId, expectedToken, expectedBudget)`; contract pulls `job.budget` of the job's payment token from client into escrow.
 - **Open → Rejected**: Client or provider calls `reject(jobId, reason?)`.
 - **Open → Expired**: When `block.timestamp >= job.expiredAt`, anyone may call `claimRefund(jobId)`; contract sets state to Expired. No refund to client as job has not been funded yet.
+- **Open → Submitted**: zero-budget jobs only (`budget == 0`, no escrow): provider calls `submit(jobId, deliverable)` directly from Open (see `submit` under [Core Functions](#core-functions)).
 - **Funded → Submitted**: Provider calls `submit(jobId, deliverable)`; signals that work has been completed and is ready for evaluation.
 - **Funded → Rejected**: Evaluator calls `reject(jobId, reason?)`; contract refunds client.
 - **Funded → Expired**: When `block.timestamp >= job.expiredAt`, anyone may call `claimRefund(jobId)`; contract sets state to Expired and refunds client.
@@ -69,8 +70,9 @@ Each job SHALL have at least:
 - `client`, `provider`, `evaluator` (addresses). **Provider MAY be zero at creation** (see [Optional provider](#optional-provider-set-later) below).
 - `description` (string) — set at creation (e.g. job brief, scope reference).
 - `budget` (uint256)
-- `expiredAt` (uint256 timestamp)
+- `expiredAt` (uint48 timestamp)
 - `status` (Open | Funded | Submitted | Completed | Rejected | Expired)
+- `submittedAt` (uint48 timestamp) — OPTIONAL for the core protocol; SHOULD be recorded on `submit` for grace-period accounting, REQUIRED when implementing Signed Authorizations (which bind it). Default `0` (not submitted).
 - `paymentToken` (address) — the [ERC-20](./eip-20.md) token used for payment on this job, set via `setBudget`.
 - `hook` (address) — OPTIONAL. External hook contract called before and after core functions (see [Hooks](#hooks-optional) below). MAY be `address(0)` (no hook).
 - `payoutReceiver` (address) — OPTIONAL. Provider-managed payout recipient. MAY be `address(0)` to pay the provider directly. Set via `setPayoutReceiver`.
@@ -83,21 +85,16 @@ Each job has its own [ERC-20](./eip-20.md) payment token. The token address is s
 
 ### Optional provider (set later)
 
-Jobs MAY be created **without a provider** by passing `provider = address(0)` to `createJob`. In that case the client SHALL set the provider later via `setProvider(jobId, provider, agentId?)` before funding. This supports flows such as bidding or assignment after creation.
-
-- **setProvider(jobId, provider, agentId?)**
-Called by **client** only. SHALL revert if job is not Open, the job has expired, the current `job.provider != address(0)`, `provider == address(0)`, `provider == job.client`, or `provider == job.evaluator`. SHALL set `job.provider = provider`. `agentId` is the provider's [ERC-8004](./eip-8004.md) agent identity; if non-zero, the contract MAY verify that `provider` is the owner or operator of that agentId on the ERC-8004 registry, and SHALL set `job.providerAgentId = agentId`. SHALL emit an event (e.g. ProviderSet) including the agentId. Implementations MAY allow an operator role to call setProvider in the future; this specification only requires client-only for the minimal protocol.
-- **fund(jobId, expectedToken, expectedBudget)**
-SHALL revert if `job.provider == address(0)` (provider MUST be set before funding), if `job.paymentToken != expectedToken`, or if `job.budget != expectedBudget` (front-running protection).
+Jobs MAY be created **without a provider** by passing `provider = address(0)` to `createJob`. In that case the client SHALL set the provider later via `setProvider(jobId, provider, agentId?)` before funding — `fund` SHALL revert while `job.provider == address(0)`. This supports flows such as bidding or assignment after creation; see `setProvider` and `fund` under [Core Functions](#core-functions) for the full specifications.
 
 ### Core Functions
 
 - **createJob(provider, evaluator, expiredAt, description, hook?, providerAgentId?)**
-Called by client. Creates job in Open with `client = msg.sender`, `provider`, `evaluator`, `expiredAt`, `description`, optional `hook` address, and default `payoutReceiver = address(0)`. SHALL revert if `evaluator` is zero, if `expiredAt` is not at least 5 minutes in the future, if `provider == evaluator`, or if `msg.sender == provider`. **Provider MAY be zero**; if so, client MUST call `setProvider` before `fund`. `hook` MAY be `address(0)` (no hook); if non-zero, the hook MUST be admin-whitelisted and SHOULD advertise support for the `IERC8183Hook` interface via ERC-165. `providerAgentId` is the provider's [ERC-8004](./eip-8004.md) agent identity; if `provider` is non-zero and `providerAgentId` is non-zero, SHALL set `job.providerAgentId = providerAgentId`; the contract MAY verify that `provider` is the owner or operator of that `providerAgentId` on the ERC-8004 registry. Returns `jobId`.
+Called by client. Creates job in Open with `client = msg.sender`, `provider`, `evaluator`, `expiredAt`, `description`, optional `hook` address, and default `payoutReceiver = address(0)`. SHALL revert if `evaluator` is zero, if `expiredAt <= block.timestamp + 5 minutes`, if `provider == evaluator`, or if `msg.sender == provider`. **Provider MAY be zero**; if so, client MUST call `setProvider` before `fund`. `hook` MAY be `address(0)` (no hook); if non-zero, implementations SHOULD gate hook attachment (see [Hook security](#hook-security)) — the reference implementation requires the hook to be admin-whitelisted and to advertise support for the `IERC8183Hook` interface via ERC-165. `providerAgentId` is the provider's [ERC-8004](./eip-8004.md) agent identity; if `provider` is non-zero and `providerAgentId` is non-zero, SHALL set `job.providerAgentId = providerAgentId`; the contract MAY verify that `provider` is the owner or operator of that `providerAgentId` on the ERC-8004 registry. Returns `jobId`.
 - **setPayoutReceiver(jobId, payoutReceiver)**
 Called by provider. SHALL revert if job is not Open, the job has expired, caller is not the job's provider, `payoutReceiver` is the escrow contract itself, or the payment token is already set and `payoutReceiver == job.paymentToken`. SHALL set the provider-side payout recipient for the job. `payoutReceiver` MAY be `address(0)` to pay the provider directly. Implementations SHOULD emit `PayoutReceiverSet`.
 - **setProvider(jobId, provider, agentId?)**
-Called by client. SHALL revert if job is not Open, has expired, current `job.provider != address(0)`, `provider == address(0)`, `provider == job.client`, or `provider == job.evaluator`. SHALL set `job.provider = provider`. `agentId` is the provider's [ERC-8004](./eip-8004.md) agent identity; if non-zero, SHALL set `job.providerAgentId = agentId`; the contract MAY verify that `provider` is the owner or operator of that agentId on the ERC-8004 registry.
+Called by client. SHALL revert if job is not Open, has expired, current `job.provider != address(0)`, `provider == address(0)`, `provider == job.client`, or `provider == job.evaluator`. SHALL set `job.provider = provider`. `agentId` is the provider's [ERC-8004](./eip-8004.md) agent identity; if non-zero, SHALL set `job.providerAgentId = agentId`; the contract MAY verify that `provider` is the owner or operator of that agentId on the ERC-8004 registry. SHALL emit an event (e.g. ProviderSet) including the agentId. Implementations MAY allow an operator role to call setProvider in the future; this specification only requires client-only for the minimal protocol.
 - **setBudget(jobId, token, amount, optParams?)**
 Called by the job's provider. Sets `job.paymentToken = token` and `job.budget = amount`. SHALL revert if job is not Open, has expired, caller is not the provider, `token` is the zero address, or a nonzero `payoutReceiver` already equals `token`. Implementations SHOULD restrict `token` to an admin-managed allowlist of tokens with vetted ERC-20 semantics, to reject tokens that would break escrow accounting (e.g. fee-on-transfer, rebasing, transfer-hooked, pausable, or blacklist tokens); the reference implementation reverts with `PaymentTokenNotAllowed` for tokens not on the allowlist. `optParams` forwarded to hook if set.
 - **fund(jobId, expectedToken, expectedBudget, optParams?)**
@@ -105,11 +102,11 @@ Called by client. SHALL revert if job is not Open, caller is not client, **provi
 - **submit(jobId, deliverable, optParams?)**
 Called by provider only. SHALL revert if caller is not the job's provider, or if `job.expiredAt > 0` and the job has expired. SHALL revert if job is not Funded, unless the job is Open with `budget == 0` (zero-budget job, no escrow needed). SHALL set status to Submitted and SHOULD record `submittedAt = block.timestamp` for grace-period accounting. `deliverable` (`bytes32`) is a reference to submitted work (e.g. hash of off-chain deliverable, IPFS CID, attestation commitment). SHALL emit an event including `deliverable` (e.g. JobSubmitted). `optParams` forwarded to hook if set.
 - **complete(jobId, reason, optParams?)**
-Called by evaluator only. SHALL revert if job is not Submitted or caller is not the job's evaluator. SHALL set status to Completed. SHALL transfer the unsettled remainder (`budget - settledAmount`) to the provider-side payout recipient, minus optional platform fee to a configurable treasury and optional evaluator fee paid to the evaluator address. `reason` MAY be `bytes32(0)` or an attestation hash (OPTIONAL). SHALL emit an event including `reason` if provided. `optParams` forwarded to hook if set.
+Called by evaluator only. SHALL revert if job is not Submitted or caller is not the job's evaluator. SHALL set status to Completed. SHALL transfer the unsettled remainder (`budget - settledAmount`) to the provider-side payout recipient, minus optional platform fee to a configurable treasury and optional evaluator fee paid to the evaluator address. `reason` MAY be `bytes32(0)` or an attestation hash (OPTIONAL). SHALL emit an event including `reason`. `optParams` forwarded to hook if set.
 - **reject(jobId, reason, optParams?)**
-Called by **client or provider when job is Open**, or by **evaluator when job is Funded or Submitted**. SHALL revert if job is not Open, Funded, or Submitted, or if the caller is not authorised for the current status. SHALL set status to Rejected. If Funded or Submitted, SHALL refund the unsettled remainder (`budget - settledAmount`) to client. If a settlement claim is pending, SHALL clear it (see [Claim interactions](#claim-interactions) below). `reason` OPTIONAL. SHALL emit an event including `reason` and the caller (rejector) if provided. `optParams` forwarded to hook if set.
-- **claimRefund(jobId, optParams)**
-Callable by anyone when status is Open, Funded, or Submitted. SHALL revert if status is Open or Funded and `block.timestamp < job.expiredAt`. SHALL revert if status is Submitted and `block.timestamp < job.expiredAt + EVALUATION_GRACE_PERIOD` (the grace period protects an evaluator who is mid-review from being censored by a third-party refund call; implementations MAY set the grace period length or omit it). SHALL revert if a settlement claim is pending on a non-Submitted job (claims can only arise while Funded) — pending claims MUST be resolved (approved, rejected, or withdrawn) before an expiry refund. SHALL set status to Expired. If the prior status was Funded or Submitted, SHALL transfer the unsettled remainder (`budget - settledAmount`), if non-zero, to the client. MAY be hookable; a reverting hook can then block the refund (see the liveness caveat under [**Hook security**](#hook-security)). Implementations requiring an unconditional post-expiry refund SHALL keep `claimRefund` non-hookable.
+Called by **client or provider when job is Open**, or by **evaluator when job is Funded or Submitted**. SHALL revert if job is not Open, Funded, or Submitted, or if the caller is not authorised for the current status. SHALL set status to Rejected. If Funded or Submitted, SHALL refund the unsettled remainder (`budget - settledAmount`) to client. If a settlement claim is pending, SHALL clear it (see [Claim interactions](#claim-interactions) below). `reason` OPTIONAL. SHALL emit an event including `reason` and the caller (rejector). `optParams` forwarded to hook if set.
+- **claimRefund(jobId, optParams?)**
+Callable by anyone when status is Open, Funded, or Submitted. SHALL revert if status is Open or Funded and `block.timestamp < job.expiredAt`. SHALL revert if status is Submitted and `block.timestamp < job.expiredAt + EVALUATION_GRACE_PERIOD` (see the grace-period rationale under [State Machine](#state-machine)). SHALL revert if a settlement claim is pending on a non-Submitted job (claims can only arise while Funded) — pending claims MUST be resolved (approved, rejected, or withdrawn) before an expiry refund. SHALL set status to Expired. If the prior status was Funded or Submitted, SHALL transfer the unsettled remainder (`budget - settledAmount`), if non-zero, to the client. MAY be hookable; a reverting hook can then block the refund (see the liveness caveat under [**Hook security**](#hook-security)). Implementations requiring an unconditional post-expiry refund SHALL keep `claimRefund` non-hookable.
 
 > **Design rationale — refund forwarding for contract clients.** `claimRefund` is
 > intentionally hookable *and* its callbacks are intentionally **blocking**, to support a
@@ -141,7 +138,7 @@ While a job is Funded, escrow MAY be released incrementally through **claim sett
 
 All settlement functions take a **cumulative amount** — the total gross amount the caller asserts should have been released to date — never a delta. Each settlement SHALL release exactly `cumulativeAmount - settledAmount`, then set `settledAmount = cumulativeAmount`. A settlement SHALL revert if `cumulativeAmount <= settledAmount` (no new settlement) or `cumulativeAmount > budget` (exceeds escrow). Because both paths write the same strictly-increasing `settledAmount`, no interleaving of client-initiated settlements, claim approvals, completion, rejection, and refund can release more than `budget` in total. The delta paid by a claim approval can only shrink between submission and approval, never grow.
 
-At most one claim is pending per job. Implementations SHALL bind the pending claim by a hash over `(cumulativeAmount, deliverable, optParams)` so that approval and rejection require presenting the exact claim contents.
+At most one claim is pending per job. Implementations SHALL bind the pending claim by a hash over `(cumulativeAmount, deliverable, optParams)` so that approval and rejection require presenting the exact claim contents. As with `submit`, `deliverable` is a `bytes32` reference (e.g. hash of an off-chain deliverable, IPFS CID, attestation commitment); in a claim it identifies the milestone or phase being settled rather than the full work.
 
 - **submitClaim(jobId, cumulativeAmount, deliverable, optParams?)**
 Called by **provider** only. Files a pending claim against a Funded job; moves no funds. SHALL revert if the job is not Funded, has expired, `deliverable == bytes32(0)`, a claim is already pending, `cumulativeAmount <= settledAmount`, `cumulativeAmount > budget`, or an identical claim tuple `(cumulativeAmount, deliverable, optParams)` was previously filed on this job (replay protection; implementations SHOULD track consumed claim hashes). SHALL emit ClaimSubmitted including `optParams` so the exact claim preimage can be propagated to observers. `optParams` forwarded to hook if set.
@@ -179,7 +176,7 @@ Dynamic callback detection adds ERC-165 probing cost to each nonzero payout rout
 
 ### Hooks (OPTIONAL)
 
-Implementations MAY support an optional **hook contract** per job to extend the core protocol without modifying it. The hook address is set at job creation (or `address(0)` for no hook) and stored on the job. A **non-hooked kernel** that ignores the `hook` field (or always sets it to `address(0)`) is fully compliant with this specification. The reference `ERC8183` contract supports both modes in a single contract: jobs with `hook == address(0)` skip all callbacks, and jobs with a whitelisted hook receive `beforeAction` / `afterAction` callbacks on the hookable functions listed below.
+Implementations MAY support an optional **hook contract** per job to extend the core protocol without modifying it. The hook address is set at job creation (or `address(0)` for no hook) and stored on the job. A **non-hooked implementation** that ignores the `hook` field (or always sets it to `address(0)`) is fully compliant with this specification. The reference `ERC8183` contract supports both modes in a single contract: jobs with `hook == address(0)` skip all callbacks, and jobs with a whitelisted hook receive `beforeAction` / `afterAction` callbacks on the hookable functions listed below.
 
 A hook contract SHALL implement the `IERC8183Hook` interface — just two functions:
 
@@ -202,11 +199,11 @@ function beforeAction(uint256 jobId, bytes4 selector, bytes calldata data) exter
 }
 ```
 
-When a job has a hook set, the core contract SHALL call `hook.beforeAction(...)` and `hook.afterAction(...)` around each hookable function. `createJob` is `afterAction`-only: the hook is attached during creation, so no `beforeAction` can fire (there is no attached hook before the job exists), but `afterAction` fires once the job is created so the hook can initialize per-job bookkeeping or revert to reject the job. Conformant non-hooked kernels simply ignore the field.
+When a job has a hook set, the core contract SHALL call `hook.beforeAction(...)` and `hook.afterAction(...)` around each hookable function. `createJob` is `afterAction`-only — no hook is attached before the job exists — so the after-callback is where a hook initializes per-job bookkeeping or reverts to reject the job. Non-hooked implementations simply ignore the field.
 
 | Core function  | Hookable |
 | -------------- | -------- |
-| `createJob`    | **Yes (`afterAction` only)** — hook is attached during creation; only the after-callback fires |
+| `createJob`    | **Yes (`afterAction` only)** |
 | `setPayoutReceiver` | Yes |
 | `setProvider`  | Yes      |
 | `setBudget`    | Yes      |
@@ -240,7 +237,7 @@ The `data` parameter passed to hooks contains the core function's parameters enc
 | `rejectClaim`  | `abi.encode(address actor, uint256 cumulativeAmount, bytes32 deliverable, bytes32 reason, bytes optParams)` |
 | `claimRefund`  | `abi.encode(address actor, bytes optParams)` |
 
-`actor` is the principal who authorized the action: `msg.sender` for direct calls, the EIP-712 signer for `*WithAuthorization` calls, and `msg.sender` (whoever triggered the refund) for the permissionless `claimRefund`. For `createJob`, `providerAgentId` is the canonicalized value stored on the job (zero for a providerless job), so it always agrees with `jobs[jobId]`.
+`actor` is the principal who authorized the action: `msg.sender` for direct calls, the EIP-712 signer for `*WithAuthorization` calls, and `msg.sender` (whoever triggered the refund) for the permissionless `claimRefund`. For `createJob`, `providerAgentId` is the value stored on the job (zero for a providerless job), so it always agrees with `jobs[jobId]`.
 
 When `submit` or `reject` supersedes a pending claim, no claim-specific hook callback fires for the supersession itself; hooks observe the post-supersession claim state in the `submit`/`reject` callbacks.
 
@@ -254,7 +251,9 @@ When `submit` or `reject` supersedes a pending claim, no claim-specific hook cal
 #### Hook security
 
 - Hooks are **trusted** contracts chosen by the client at job creation. A malicious or buggy hook can revert valid actions or execute arbitrary logic in callbacks. Clients SHOULD audit or use well-known hook implementations.
-- **Liveness:** A reverting hook can block all hookable actions for that job, including the post-expiry refund. A hook that consumes unbounded gas blocks identically — no finite caller gas budget covers it, and there is no revert to signal it — so gas exhaustion is equivalent to a revert throughout this section. This is the accepted cost of refund forwarding for contract clients; the full argument is the design rationale under `claimRefund` in [Core Functions](#core-functions). The forward-or-revert expectation on forwarding hooks is likewise a hook obligation, not a kernel invariant: the contract does not verify that a refund moved onward, so a no-op `afterAction` on a contract client finalizes the job with the refund left in the intermediary. The trust model mitigates both in two layers. First, whitelisting is expected to include an audit that the hook never blocks lifecycle paths: a hook MUST NOT revert on `claimRefund` except for a genuine forward failure, MUST NOT consume unbounded gas on any hooked selector, MUST NOT derive routing or authorization from the caller-supplied `optParams` on that permissionless path (a stranger may trigger `claimRefund`), and — when it forwards refunds for a contract client — MUST forward or revert, never no-op. Second, the admin can `pause()` and `forceRefund` the job as an on-chain break-glass. Its eligibility is identical to `claimRefund` with the hook callbacks skipped; the refund goes to the client by default (or to an admin-chosen recipient when the client contract cannot receive funds without its blocked hook), and the job expires atomically with the payout so a rescued job can never be refunded twice. Implementations SHOULD emit a dedicated event for the rescue (the reference implementation emits `ForceRefunded(jobId, admin, recipient, amount)` alongside the generic `Refunded`) so an admin redirect is attributable from the event stream alone. `batchDetachHook` is a lighter option for a non-forwarding hook; `emergencyWithdraw` remains reserved for funds not attributed to any job. Earlier drafts kept `claimRefund` non-hookable, and deployments that want that unconditional, trust-minimized refund SHOULD attach no hook (or a non-reverting hook).
+- **Liveness:** a reverting hook can block every hookable action, including the post-expiry refund; a hook that consumes unbounded gas blocks identically, so gas exhaustion counts as a revert throughout this section. The contract does not verify that a forwarded refund moved onward. See the design rationale under `claimRefund` in [Core Functions](#core-functions).
+- **Audit obligations:** implementations that make `claimRefund` hookable MUST gate hook attachment behind an audit (the reference implementation admin-whitelists hooks). An approved hook MUST NOT revert on `claimRefund` (except for a genuine forward failure), consume unbounded gas on any hooked selector, derive routing or authorization from the caller-supplied `optParams` on that permissionless path, or no-op a refund it is expected to forward.
+- **Break-glass:** under `pause()`, admin `forceRefund` applies `claimRefund`'s eligibility with hook callbacks skipped, pays the client (or an admin-chosen recipient when the client contract cannot receive funds), and expires the job atomically — a rescued job cannot be refunded twice. Implementations SHOULD emit a dedicated event (`ForceRefunded(jobId, admin, recipient, amount)` in the reference implementation). `batchDetachHook` suits non-forwarding hooks; `emergencyWithdraw` is reserved for funds not attributed to any job. Deployments that need an unconditional post-expiry refund SHOULD attach no hook (or a non-reverting hook).
 - **Atomicity:** After-callbacks run after state changes but within the same transaction. If an after-callback reverts, the entire transaction (including the core state change) is rolled back. This is intentional — it enables atomic multi-step flows (e.g. escrow funding + side token transfer must both succeed or both revert).
 - `onlyERC8183` modifiers on hooks are RECOMMENDED so that hook functions cannot be called directly by external actors.
 - Hooks SHOULD NOT be upgradeable after a job is created, as this would allow the hook to change behaviour mid-job.
@@ -380,7 +379,7 @@ Implementations SHOULD emit at least:
 - **Disbursed**(jobId, receiver, selector, amount) — emitted after `IDisburser.onDisbursement` is invoked
 - **PlatformFeePaid**(jobId, platformTreasury, amount) — only emitted when a non-zero platform fee is taken
 - **EvaluatorFeePaid**(jobId, evaluator, amount) — only emitted when a non-zero evaluator fee is taken
-- **Refunded**(jobId, client, amount)
+- **Refunded**(jobId, recipient, amount) — recipient is the client, except under a `forceRefund` destination override (see `ForceRefunded` below)
 - **Settled**(jobId, cumulativeAmount, delta) — emitted on every settlement regardless of path
 - **ClaimSubmitted**(jobId, provider, cumulativeAmount, delta, deliverable, optParams) — provider files a pending claim; `optParams` is emitted so the exact claim preimage can be propagated to observers
 - **ClaimSettled**(jobId, settler, cumulativeAmount, delta, deliverable) — client-initiated settlement; `deliverable` is the settler's attestation, not a verified provider claim
@@ -389,7 +388,7 @@ Implementations SHOULD emit at least:
 
 Note that `PaymentReleased`, `PlatformFeePaid`, and `EvaluatorFeePaid` fire on each settlement, not only on completion.
 
-Implementations that add admin tooling SHOULD also emit operational events (e.g. `HookWhitelistUpdated`, `PaymentTokenAllowlistUpdated`, `HookDetached`, `PlatformFeeUpdated`, `EvaluatorFeeUpdated`, `EmergencyWithdraw`) so off-chain indexers can track configuration changes.
+Implementations that add admin tooling SHOULD also emit operational events (e.g. `HookWhitelistUpdated`, `PaymentTokenAllowlistUpdated`, `HookDetached`, `PlatformFeeUpdated`, `EvaluatorFeeUpdated`, `ForceRefunded`, `EmergencyWithdraw`) so off-chain indexers can track configuration changes.
 
 ## Rationale
 
@@ -499,7 +498,7 @@ interface IERC8183Hook is IERC165 {
 ### IDisburser.sol
 
 ```solidity
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.28;
 
 import "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 
@@ -563,7 +562,7 @@ function DOMAIN_SEPARATOR() external view returns (bytes32);
 - **Reentrancy:** Functions that transfer tokens SHALL be protected (e.g. reentrancy guard). Claim settlement transfers tokens mid-lifecycle (not only terminally), so effects-before-transfers ordering (update `settledAmount`, clear the pending claim, then transfer) is mandatory, not advisory.
 - **Tokens:** Use SafeERC-20 or equivalent for [ERC-20](./eip-20.md).
 - **Evaluator:** MUST be set at creation; if "client completes", pass `evaluator = client`.
-- **Hook gas limits** (for hooked implementations): Implementations SHOULD impose a gas limit on hook calls (e.g. `call{gas: HOOK_GAS_LIMIT}(...)`) to bound execution cost and prevent hooks from consuming unbounded gas. The specific limit is left to the implementation as gas costs vary across chains.
+- **Hook gas limits** (for hooked implementations): Implementations SHOULD impose a gas limit on hook calls (e.g. `call{gas: HOOK_GAS_LIMIT}(...)`) to bound execution cost and prevent hooks from consuming unbounded gas. The specific limit is left to the implementation as gas costs vary across chains. The reference implementation does not currently impose one; it relies on the whitelist audit, treating gas exhaustion as blocking per [Hook security](#hook-security).
 - Hook contracts are client-supplied and trusted by the client; implementations MUST NOT allow hooks to modify core escrow state directly. Where `claimRefund` is hookable (as in the reference implementation), a reverting hook can block refunds after expiry; see [Hook security](#hook-security) for the whitelist-audit and break-glass mitigations. Any rescue path MUST close the job's accounting atomically with the payout so a rescued job cannot be refunded twice; a free-form escape hatch like `emergencyWithdraw` SHOULD be reserved for funds not attributed to any job. Implementations requiring an unconditional, trust-minimized post-expiry refund SHALL keep `claimRefund` non-hookable.
 - Jobs that use **advanced hooks** (e.g. two‑phase escrow / fund‑transfer hooks that custody additional tokens) are expected to have **more revert paths and tighter coupling** to external logic than plain, non‑hooked Agentic Commerce jobs. Such hooks SHOULD be reserved for agents and users who understand and accept this trade‑off; for most simple jobs, a non‑hooked or policy‑only hook is RECOMMENDED.
 
