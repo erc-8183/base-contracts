@@ -33,7 +33,7 @@ A **job** has exactly one of six states:
 | State         | Meaning                                                                                                           |
 | ------------- | ----------------------------------------------------------------------------------------------------------------- |
 | **Open**      | Created; budget not yet set or not yet funded. Client may set budget, then fund or reject.                        |
-| **Funded**    | Budget escrowed. Provider may submit work or file a settlement claim; client may settle partial amounts directly or approve/reject a pending claim; evaluator may approve/reject a pending claim or reject the job. After `expiredAt`, anyone may trigger refund of the unsettled remainder (`budget - settledAmount`, see Job Data), provided no claim is pending. |
+| **Funded**    | Budget escrowed. Provider may submit work or file a settlement claim; client may settle partial amounts directly or approve/reject a pending claim; evaluator may approve/reject a pending claim or reject the job. After `expiredAt`, anyone may trigger refund of the unsettled remainder (`budget - settledAmount`, see [Job Data](#job-data)), provided no claim is pending. |
 | **Submitted** | Provider has submitted work. Only evaluator may complete or reject. After `expiredAt + EVALUATION_GRACE_PERIOD`, anyone may trigger refund. |
 | **Completed** | Terminal. Unsettled remainder released to provider (minus optional fees).                                         |
 | **Rejected**  | Terminal. Unsettled remainder refunded to client.                                                                 |
@@ -54,7 +54,7 @@ Allowed transitions:
 
 No other transitions are valid.
 
-Settlement claims (see Claim Settlement below) do not introduce job states: all claim activity occurs while the job is Funded, and at most one claim is pending per job at any time.
+Settlement claims (see [Claim Settlement](#claim-settlement) below) do not introduce job states: all claim activity occurs while the job is Funded, and at most one claim is pending per job at any time.
 
 ### Roles
 
@@ -66,16 +66,16 @@ Settlement claims (see Claim Settlement below) do not introduce job states: all 
 
 Each job SHALL have at least:
 
-- `client`, `provider`, `evaluator` (addresses). **Provider MAY be zero at creation** (see Optional provider below).
+- `client`, `provider`, `evaluator` (addresses). **Provider MAY be zero at creation** (see [Optional provider](#optional-provider-set-later) below).
 - `description` (string) — set at creation (e.g. job brief, scope reference).
 - `budget` (uint256)
 - `expiredAt` (uint256 timestamp)
 - `status` (Open | Funded | Submitted | Completed | Rejected | Expired)
 - `paymentToken` (address) — the [ERC-20](./eip-20.md) token used for payment on this job, set via `setBudget`.
-- `hook` (address) — OPTIONAL. External hook contract called before and after core functions (see Hooks below). MAY be `address(0)` (no hook).
+- `hook` (address) — OPTIONAL. External hook contract called before and after core functions (see [Hooks](#hooks-optional) below). MAY be `address(0)` (no hook).
 - `payoutReceiver` (address) — OPTIONAL. Provider-managed payout recipient. MAY be `address(0)` to pay the provider directly. Set via `setPayoutReceiver`.
 - `providerAgentId` (uint256) — OPTIONAL. When non-zero, references an agent identity in an [ERC-8004](./eip-8004.md) registry, enabling on-chain identity binding for reputation. Set via `setProvider` (or at creation if provider is known). Default `0` (unset).
-- `settledAmount` (uint256) — cumulative gross amount already released through claim settlements (see Claim Settlement below). Initially `0`. MUST be strictly monotonically increasing and MUST NOT exceed `budget`.
+- `settledAmount` (uint256) — cumulative gross amount already released through claim settlements (see [Claim Settlement](#claim-settlement) below). Initially `0`. MUST be strictly monotonically increasing and MUST NOT exceed `budget`.
 
 All payout and refund computations in this specification are defined over the **unsettled remainder** `budget - settledAmount`. For jobs that never use claim settlement, `settledAmount` remains `0` and every formula reduces to the full budget.
 
@@ -107,9 +107,9 @@ Called by provider only. SHALL revert if caller is not the job's provider, or if
 - **complete(jobId, reason, optParams?)**
 Called by evaluator only. SHALL revert if job is not Submitted or caller is not the job's evaluator. SHALL set status to Completed. SHALL transfer the unsettled remainder (`budget - settledAmount`) to the provider-side payout recipient, minus optional platform fee to a configurable treasury and optional evaluator fee paid to the evaluator address. `reason` MAY be `bytes32(0)` or an attestation hash (OPTIONAL). SHALL emit an event including `reason` if provided. `optParams` forwarded to hook if set.
 - **reject(jobId, reason, optParams?)**
-Called by **client or provider when job is Open**, or by **evaluator when job is Funded or Submitted**. SHALL revert if job is not Open, Funded, or Submitted, or if the caller is not authorised for the current status. SHALL set status to Rejected. If Funded or Submitted, SHALL refund the unsettled remainder (`budget - settledAmount`) to client. If a settlement claim is pending, SHALL clear it (see Claim interactions below). `reason` OPTIONAL. SHALL emit an event including `reason` and the caller (rejector) if provided. `optParams` forwarded to hook if set.
+Called by **client or provider when job is Open**, or by **evaluator when job is Funded or Submitted**. SHALL revert if job is not Open, Funded, or Submitted, or if the caller is not authorised for the current status. SHALL set status to Rejected. If Funded or Submitted, SHALL refund the unsettled remainder (`budget - settledAmount`) to client. If a settlement claim is pending, SHALL clear it (see [Claim interactions](#claim-interactions) below). `reason` OPTIONAL. SHALL emit an event including `reason` and the caller (rejector) if provided. `optParams` forwarded to hook if set.
 - **claimRefund(jobId, optParams)**
-Callable by anyone when status is Open, Funded, or Submitted. SHALL revert if status is Open or Funded and `block.timestamp < job.expiredAt`. SHALL revert if status is Submitted and `block.timestamp < job.expiredAt + EVALUATION_GRACE_PERIOD` (the grace period protects an evaluator who is mid-review from being censored by a third-party refund call; implementations MAY set the grace period length or omit it). SHALL revert if a settlement claim is pending on a non-Submitted job (claims can only arise while Funded) — pending claims MUST be resolved (approved, rejected, or withdrawn) before an expiry refund. SHALL set status to Expired. If the prior status was Funded or Submitted, SHALL transfer the unsettled remainder (`budget - settledAmount`), if non-zero, to the client. MAY be hookable; if hookable, the `beforeAction`/`afterAction` callbacks fire around the refund and a reverting hook can block it (see the liveness caveat under **Hook security**). Implementations requiring an unconditional post-expiry refund SHALL keep `claimRefund` non-hookable.
+Callable by anyone when status is Open, Funded, or Submitted. SHALL revert if status is Open or Funded and `block.timestamp < job.expiredAt`. SHALL revert if status is Submitted and `block.timestamp < job.expiredAt + EVALUATION_GRACE_PERIOD` (the grace period protects an evaluator who is mid-review from being censored by a third-party refund call; implementations MAY set the grace period length or omit it). SHALL revert if a settlement claim is pending on a non-Submitted job (claims can only arise while Funded) — pending claims MUST be resolved (approved, rejected, or withdrawn) before an expiry refund. SHALL set status to Expired. If the prior status was Funded or Submitted, SHALL transfer the unsettled remainder (`budget - settledAmount`), if non-zero, to the client. MAY be hookable; a reverting hook can then block the refund (see the liveness caveat under [**Hook security**](#hook-security)). Implementations requiring an unconditional post-expiry refund SHALL keep `claimRefund` non-hookable.
 
 > **Design rationale — refund forwarding for contract clients.** `claimRefund` is
 > intentionally hookable *and* its callbacks are intentionally **blocking**, to support a
@@ -128,18 +128,18 @@ Callable by anyone when status is Open, Funded, or Submitted. SHALL revert if st
 > refund into the intermediary while silently dropping the forward.
 >
 > The accepted cost is that the post-expiry refund is no longer *unconditionally* live: a
-> buggy or fail-closed hook can revert and block it (see **Hook security**). Deployments that
+> buggy or fail-closed hook can revert and block it (see [**Hook security**](#hook-security)). Deployments that
 > do not need contract-client forwarding SHOULD attach no hook (or a hook that never reverts
 > on the `claimRefund` selector) so the refund stays unconditional.
 
-### Claim Settlement
+#### Claim Settlement
 
-While a job is Funded, escrow MAY be released incrementally through **claim settlement**, ahead of (or instead of) terminal completion. Two settlement paths share one ledger:
+While a job is Funded, escrow MAY be released incrementally through **claim settlement**, ahead of (or instead of) terminal completion. The four claim-settlement functions are core entry points like the lifecycle functions above; they are specified together because two settlement paths share one ledger:
 
-- the **direct path**: the client unilaterally settles an amount to the provider (`settleClaim`);
-- the **claim path**: the provider files a pending claim (`submitClaim`) which the client or evaluator approves (`approveClaim`) or any of the three parties rejects (`rejectClaim`).
+- the **client-initiated path**: the client unilaterally settles an amount to the provider (`settleClaim`);
+- the **provider-initiated path**: the provider files a pending claim (`submitClaim`) which the client or evaluator approves (`approveClaim`) or any of the three parties rejects (`rejectClaim`).
 
-All settlement functions take a **cumulative amount** — the total gross amount the caller asserts should have been released to date — never a delta. Each settlement SHALL release exactly `cumulativeAmount - settledAmount`, then set `settledAmount = cumulativeAmount`. A settlement SHALL revert if `cumulativeAmount <= settledAmount` (no new settlement) or `cumulativeAmount > budget` (exceeds escrow). Because both paths write the same strictly-increasing `settledAmount`, no interleaving of direct settlements, claim approvals, completion, rejection, and refund can release more than `budget` in total, and the delta paid by a claim approval can only shrink between submission and approval, never grow.
+All settlement functions take a **cumulative amount** — the total gross amount the caller asserts should have been released to date — never a delta. Each settlement SHALL release exactly `cumulativeAmount - settledAmount`, then set `settledAmount = cumulativeAmount`. A settlement SHALL revert if `cumulativeAmount <= settledAmount` (no new settlement) or `cumulativeAmount > budget` (exceeds escrow). Because both paths write the same strictly-increasing `settledAmount`, no interleaving of client-initiated settlements, claim approvals, completion, rejection, and refund can release more than `budget` in total. The delta paid by a claim approval can only shrink between submission and approval, never grow.
 
 At most one claim is pending per job. Implementations SHALL bind the pending claim by a hash over `(cumulativeAmount, deliverable, optParams)` so that approval and rejection require presenting the exact claim contents.
 
@@ -148,15 +148,16 @@ Called by **provider** only. Files a pending claim against a Funded job; moves n
 - **settleClaim(jobId, cumulativeAmount, deliverable, optParams?)**
 Called by **client** only. Immediate unilateral settlement: SHALL revert if the job is not Funded, has expired, `cumulativeAmount <= settledAmount`, or `cumulativeAmount > budget`. SHALL set `settledAmount = cumulativeAmount` and distribute the delta to the provider-side payout recipient (minus optional platform/evaluator fees). `deliverable` is the client's settlement attestation, not a verified provider claim. A pending claim SHALL NOT block this function (streaming settlement); settling reduces the delta any subsequent approval of that claim would pay. SHALL emit Settled and ClaimSettled. `optParams` forwarded to hook if set.
 - **approveClaim(jobId, cumulativeAmount, deliverable, optParams?)**
-Called by **client or evaluator**. SHALL revert if the job is not Funded, no claim is pending, or the arguments do not exactly match the pending claim — the evaluator MUST NOT be able to release amounts the provider did not claim. SHALL revert if `cumulativeAmount <= settledAmount` (e.g. the claim was already covered by direct settlement) or `cumulativeAmount > budget`. SHALL consume the pending claim, set `settledAmount = cumulativeAmount`, and distribute the delta to the provider-side payout recipient (minus optional fees). Approval is NOT subject to an expiry check: a claim filed before expiry remains approvable, consistent with the evaluation grace period philosophy. SHALL emit Settled and ClaimApproved. `optParams` forwarded to hook if set.
+Called by **client or evaluator**. SHALL revert if the job is not Funded, no claim is pending, or the arguments do not exactly match the pending claim — the evaluator MUST NOT be able to release amounts the provider did not claim. SHALL revert if `cumulativeAmount <= settledAmount` (e.g. the claim was already covered by a client-initiated settlement) or `cumulativeAmount > budget`. SHALL consume the pending claim, set `settledAmount = cumulativeAmount`, and distribute the delta to the provider-side payout recipient (minus optional fees). Approval is NOT subject to an expiry check: a claim filed before expiry remains approvable, for the same reason the evaluation grace period exists — a review in flight when the job expires may still finish. SHALL emit Settled and ClaimApproved. `optParams` forwarded to hook if set.
 - **rejectClaim(jobId, cumulativeAmount, deliverable, reason, optParams?)**
 Called by **client, evaluator, or provider** (the provider withdrawing their own stale claim, e.g. to file a corrected one). SHALL revert if the job is not Funded, no claim is pending, or the arguments do not exactly match the pending claim. SHALL consume the pending claim without moving funds. The consumed claim tuple SHALL remain unfilable — a corrected claim must differ in `cumulativeAmount`, `deliverable`, or `optParams`. SHALL emit ClaimRejected. `optParams` forwarded to hook if set.
 
-#### Claim interactions
+##### Claim interactions
 
 - **submit** SHALL supersede any pending claim — the provider is electing the full-completion path for the entire remainder — and SHOULD emit ClaimRejected with a supersession reason so hooks and indexers observe a closed claim lifecycle.
+- **complete** requires no supersession logic: claims can only be filed while the job is Funded, and `complete` is callable only once the job is Submitted — by which point `submit` has already superseded any pending claim, so `complete` can never encounter one.
 - Job-level **reject** SHALL also clear any pending claim (emitting ClaimRejected) before transitioning the job to Rejected.
-- **claimRefund** SHALL revert while a claim is pending (claims can only arise while Funded); the claim must be approved, rejected, or withdrawn first. For non-hooked jobs the client can always unblock a refund in two transactions (`rejectClaim`, then `claimRefund`); for hooked jobs, a reverting `rejectClaim` hook can block this path (see Hook security).
+- **claimRefund** SHALL revert while a claim is pending (claims can only arise while Funded); the claim must be approved, rejected, or withdrawn first. For non-hooked jobs the client can always unblock a refund in two transactions (`rejectClaim`, then `claimRefund`); for hooked jobs, a reverting `rejectClaim` hook can block this path (see [Hook security](#hook-security)).
 - Implementations SHALL update `settledAmount` and clear the pending claim **before** any token transfers (checks-effects-interactions).
 
 ### Attestation
@@ -166,7 +167,7 @@ Called by **client, evaluator, or provider** (the provider withdrawing their own
 
 ### Fees
 
-Implementations MAY charge a **platform fee** and/or an **evaluator fee** (both in basis points). The platform fee is paid to a configurable treasury; the evaluator fee is paid to the job's evaluator address. The specification does not require either fee. If present, fees SHALL be computed independently on each settlement delta and on the completion remainder. Note that with integer (floor) division, the aggregate fee across many small settlements MAY be marginally lower than a single fee computed over the total released amount; implementations and integrators SHOULD treat fee totals as rounding-dependent. Fees SHALL NOT be taken on refunds.
+Implementations MAY charge a **platform fee** and/or an **evaluator fee** (both in basis points). The platform fee is paid to a configurable treasury; the evaluator fee is paid to the job's evaluator address. The specification does not require either fee. If present, fees SHALL be computed independently on each settlement delta and on the completion remainder. Fees SHALL NOT be taken on refunds.
 
 ### Payout Receivers
 
@@ -174,7 +175,7 @@ Implementations MAY charge a **platform fee** and/or an **evaluator fee** (both 
 
 Implementations MAY support `IDisburser` receivers. If the payout recipient is a contract that advertises `IDisburser` via ERC-165 at payout time, the implementation SHALL transfer the provider-side net amount first, then call `onDisbursement(jobId, selector, token, amount, optParams)`. Callback detection is dynamic: a receiver with no code when set can later deploy or delegate code and receive callbacks if it advertises `IDisburser` when paid. A revert from `onDisbursement` SHALL revert the parent action, including any platform or evaluator fee transfers made in that action. EOAs and contracts that do not advertise `IDisburser` are plain recipients. Implementations SHOULD skip the callback when the net provider-side amount is zero.
 
-Dynamic callback detection adds ERC-165 probing cost to each nonzero payout routed to a contract receiver. This is the cost of preserving payout-time behavior for counterfactual deployments, upgradeable receivers, and delegated EOAs; implementations SHOULD NOT cache receiver interface support unless they also change the documented dynamic semantics.
+Dynamic callback detection adds ERC-165 probing cost to each nonzero payout routed to a contract receiver. This preserves payout-time behavior for receivers whose code appears or changes after the job is created; implementations SHOULD NOT cache receiver interface support unless they also change the documented dynamic semantics.
 
 ### Hooks (OPTIONAL)
 
@@ -189,7 +190,7 @@ interface IERC8183Hook {
 }
 ```
 
-The `selector` parameter identifies which core function is being called (e.g. the function selector for `fund`). The `data` parameter contains function-specific parameters encoded as bytes (see Data encoding below). The hook uses the selector to route internally:
+The `selector` parameter identifies which core function is being called (e.g. the function selector for `fund`). The `data` parameter contains function-specific parameters encoded as bytes (see [Data encoding](#data-encoding) below). The hook uses the selector to route internally:
 
 ```solidity
 function beforeAction(uint256 jobId, bytes4 selector, bytes calldata data) external {
@@ -217,7 +218,7 @@ When a job has a hook set, the core contract SHALL call `hook.beforeAction(...)`
 | `settleClaim`  | Yes      |
 | `approveClaim` | Yes      |
 | `rejectClaim`  | Yes      |
-| `claimRefund`  | Yes — but see the liveness caveat under **Hook security** (a reverting hook can block the permissionless refund) |
+| `claimRefund`  | Yes — but see the liveness caveat under [**Hook security**](#hook-security) (a reverting hook can block the permissionless refund) |
 
 #### Data encoding
 
@@ -245,7 +246,7 @@ When `submit` or `reject` supersedes a pending claim, no claim-specific hook cal
 
 #### Hook behaviour
 
-- The `optParams` field (`bytes`, OPTIONAL) on each hookable core function is an opaque payload forwarded to the hook via the `data` parameter. Callers that do not use hooks MAY pass empty bytes. The core contract SHALL NOT decode `optParams`; however, the claim-settlement functions hash-bind `optParams` into the claim identity, so approving or rejecting a claim requires presenting the identical `optParams` bytes.
+- The `optParams` field (`bytes`, OPTIONAL) on each hookable core function is an opaque payload forwarded to the hook via the `data` parameter. Callers that do not use hooks MAY pass empty bytes. The core contract SHALL NOT interpret `optParams`.
 - **Before hooks** (`beforeAction`) are called before the core logic executes. A before hook MAY revert to block the action (e.g. enforce custom validation, allowlists, or preconditions).
 - **After hooks** (`afterAction`) are called after the core logic completes (including state changes and token transfers). An after hook MAY perform side effects (e.g. emit events, update external state, trigger notifications) or revert to roll back the entire transaction.
 - If `job.hook == address(0)`, the core contract SHALL skip hook calls and execute normally.
@@ -253,7 +254,7 @@ When `submit` or `reject` supersedes a pending claim, no claim-specific hook cal
 #### Hook security
 
 - Hooks are **trusted** contracts chosen by the client at job creation. A malicious or buggy hook can revert valid actions or execute arbitrary logic in callbacks. Clients SHOULD audit or use well-known hook implementations.
-- **Liveness (BREAKING CHANGE):** A reverting hook can block all hookable actions for that job until `expiredAt`. This is by design — the hook is part of the job's policy. In earlier revisions of this specification `claimRefund` was deliberately **not** hookable, which gave an *unconditional* recovery guarantee: refunds after expiry could never be blocked. This revision makes `claimRefund` hookable (before + after) **intentionally and as a blocking callback**, to support a `job.client` that is a contract standing in for the real beneficiary (e.g. a smart account or router): the refund is paid to that contract and its `afterAction` callback (which runs *after* the refund transfer) atomically forwards the funds to the rightful end-client. The callback MUST be able to revert the whole refund, because a failed forward must not leave funds stranded in the intermediary client contract. The accepted trade-off is that the post-expiry refund is no longer unconditionally live: a buggy or fail-closed hook can revert and block it. The trust model handles this in two layers: **(1)** hooks are admin-whitelisted, and whitelisting is expected to include an **audit that the hook never blocks lifecycle paths** — it MUST NOT revert on `claimRefund` except for a genuine forward failure, and MUST NOT derive routing or authorization from the caller-supplied `optParams` on this permissionless path (a stranger may trigger `claimRefund`); **(2)** as an on-chain break-glass, the admin can `pause()` and `forceRefund` the job — identical eligibility to `claimRefund` with the hook callbacks skipped, paying the refund (to the client by default, or to an admin-chosen recipient when the client is an intermediary contract that cannot receive funds without its blocked hook) and expiring the job atomically so a rescued job can never be refunded twice — and `batchDetachHook` is a lighter option for a non-forwarding hook (`emergencyWithdraw` remains reserved for funds not attributed to any job). Deployments that do not need contract-client forwarding and want an unconditional, trust-minimized refund SHOULD attach no hook (or a non-reverting hook) on such jobs.
+- **Liveness:** A reverting hook can block all hookable actions for that job, including the post-expiry refund. A hook that consumes unbounded gas blocks identically — no finite caller gas budget covers it, and there is no revert to signal it — so gas exhaustion is equivalent to a revert throughout this section. This is the accepted cost of refund forwarding for contract clients; the full argument is the design rationale under `claimRefund` in [Core Functions](#core-functions). The forward-or-revert expectation on forwarding hooks is likewise a hook obligation, not a kernel invariant: the contract does not verify that a refund moved onward, so a no-op `afterAction` on a contract client finalizes the job with the refund left in the intermediary. The trust model mitigates both in two layers. First, whitelisting is expected to include an audit that the hook never blocks lifecycle paths: a hook MUST NOT revert on `claimRefund` except for a genuine forward failure, MUST NOT consume unbounded gas on any hooked selector, MUST NOT derive routing or authorization from the caller-supplied `optParams` on that permissionless path (a stranger may trigger `claimRefund`), and — when it forwards refunds for a contract client — MUST forward or revert, never no-op. Second, the admin can `pause()` and `forceRefund` the job as an on-chain break-glass. Its eligibility is identical to `claimRefund` with the hook callbacks skipped; the refund goes to the client by default (or to an admin-chosen recipient when the client contract cannot receive funds without its blocked hook), and the job expires atomically with the payout so a rescued job can never be refunded twice. Implementations SHOULD emit a dedicated event for the rescue (the reference implementation emits `ForceRefunded(jobId, admin, recipient, amount)` alongside the generic `Refunded`) so an admin redirect is attributable from the event stream alone. `batchDetachHook` is a lighter option for a non-forwarding hook; `emergencyWithdraw` remains reserved for funds not attributed to any job. Earlier drafts kept `claimRefund` non-hookable, and deployments that want that unconditional, trust-minimized refund SHOULD attach no hook (or a non-reverting hook).
 - **Atomicity:** After-callbacks run after state changes but within the same transaction. If an after-callback reverts, the entire transaction (including the core state change) is rolled back. This is intentional — it enables atomic multi-step flows (e.g. escrow funding + side token transfer must both succeed or both revert).
 - `onlyERC8183` modifiers on hooks are RECOMMENDED so that hook functions cannot be called directly by external actors.
 - Hooks SHOULD NOT be upgradeable after a job is created, as this would allow the hook to change behaviour mid-job.
@@ -382,7 +383,7 @@ Implementations SHOULD emit at least:
 - **Refunded**(jobId, client, amount)
 - **Settled**(jobId, cumulativeAmount, delta) — emitted on every settlement regardless of path
 - **ClaimSubmitted**(jobId, provider, cumulativeAmount, delta, deliverable, optParams) — provider files a pending claim; `optParams` is emitted so the exact claim preimage can be propagated to observers
-- **ClaimSettled**(jobId, settler, cumulativeAmount, delta, deliverable) — direct client settlement; `deliverable` is the settler's attestation, not a verified provider claim
+- **ClaimSettled**(jobId, settler, cumulativeAmount, delta, deliverable) — client-initiated settlement; `deliverable` is the settler's attestation, not a verified provider claim
 - **ClaimApproved**(jobId, approver, cumulativeAmount, delta, deliverable) — pending claim approved by client or evaluator
 - **ClaimRejected**(jobId, rejector, reason) — pending claim rejected, withdrawn, or superseded
 
@@ -459,7 +460,7 @@ To support gasless execution — where a client, provider, or evaluator signs an
 
 **Implementation requirements:**
 
-- Each actor-authorized core function (including the claim-settlement functions, but excluding the permissionless `claimRefund`) SHALL have a `*WithAuthorization` variant accepting the original parameters plus an `Authorization { address signer; uint72 nonce; uint256 deadline; bytes sig; }`. The reference implementation wraps `createJob`'s parameters in a `CreateJobAuthorizationParams` struct to stay within stack limits.
+- Each actor-authorized core function (all except the permissionless `claimRefund`) SHALL have a `*WithAuthorization` variant accepting the original parameters plus an `Authorization { address signer; uint72 nonce; uint256 deadline; bytes sig; }`. The reference implementation wraps `createJob`'s parameters in a `CreateJobAuthorizationParams` struct to stay within stack limits.
 - Each action SHALL have a distinct EIP-712 typehash binding `signer`, all call parameters (dynamic values such as `description` and `optParams` bound by their `keccak256` hash), `nonce`, and `deadline`, so a signature for one action can never execute another.
 - `completeWithAuthorization` and `rejectWithAuthorization` SHALL additionally bind the job's stored `submittedAt` value in the signed payload. The value is `0` for an Open or Funded job that has not been submitted, and the actual stored timestamp for a Submitted job.
 - Nonces SHALL be unordered (random-nonce style, as in ERC-3009) and single-use across all action types. The reference implementation packs them as `bytes32((uint256(uint160(signer)) << 96) | uint256(nonce))` in a single used-nonce mapping.
@@ -470,7 +471,7 @@ To support gasless execution — where a client, provider, or evaluator signs an
 
 **Token approvals:** For functions that pull tokens (e.g. `fundWithAuthorization`), the signer SHOULD use [ERC-2612](./eip-2612.md) (`permit`) to approve token spending via signature. The facilitator can then call `permit` and `fundWithAuthorization` in a single transaction — no on-chain approval tx needed from the signer.
 
-**x402 compatibility:** This extension enables compatibility with HTTP-native payment protocols such as x402, where an AI agent signs payment intents off-chain and a payment facilitator handles on-chain execution. The agent only needs a private key and tokens — no gas, no RPC management, no chain-specific logic.
+**x402 compatibility:** This extension enables compatibility with HTTP-native payment protocols such as x402, where an AI agent signs payment intents off-chain and a payment facilitator handles on-chain execution. The agent needs only a private key and tokens; the facilitator pays gas and submits the transactions.
 
 ---
 
@@ -551,7 +552,7 @@ function DOMAIN_SEPARATOR() external view returns (bytes32);
 - Evaluator is trusted for completion and rejection once the job is Submitted; a malicious evaluator can complete or reject arbitrarily. Use reputation (e.g. [ERC-8004](./eip-8004.md)) or staking for high-value jobs.
 - Once Funded, only the evaluator can reject, and only the provider can submit; the client cannot unilaterally withdraw, which protects the provider after they start work.
 - **Evaluator settlement scope:** the evaluator can approve only the exact pending claim the provider filed, never originate or alter amounts; the client can settle freely but only toward the job's provider out of their own escrow. Widening either authority breaks the trust model — in particular, allowing the evaluator to settle arbitrary amounts would escalate the evaluator from attestor to spender of client escrow.
-- **Provider-controlled payout receiver:** `payoutReceiver` controls where provider-side net payouts are sent and is therefore set by the provider while the job is Open. The reference design locks the receiver once the job is Funded so funded jobs cannot be rerouted away from a receiver that downstream custody, financing, or disbursement flows may rely on. Providers SHOULD choose receiver contracts carefully: a receiver that advertises `IDisburser` and reverts in `onDisbursement` will roll back completion or settlement, including platform and evaluator fee transfers, at the cost of blocking the provider's own payout. Evaluators can reject a Funded or Submitted job rather than complete into a reverting receiver, which refunds the client and pays no one.
+- **Provider-controlled payout receiver:** `payoutReceiver` controls where provider-side net payouts are sent and is therefore set by the provider while the job is Open. The reference design locks the receiver once the job is Funded so funded jobs cannot be rerouted away from a receiver that downstream custody, financing, or disbursement flows may rely on. Providers SHOULD choose receiver contracts carefully: a receiver that advertises `IDisburser` and reverts (or consumes unbounded gas) in `onDisbursement` will roll back completion or settlement, including platform and evaluator fee transfers, at the cost of blocking the provider's own payout. Evaluators can reject a Funded or Submitted job rather than complete into a reverting receiver, which refunds the client and pays no one.
 - **Dynamic receiver code:** `IDisburser` detection happens at payout time. A plain EOA receiver can later gain delegated code through mechanisms such as [EIP-7702](./eip-7702.md), and a counterfactual receiver can later deploy code at the selected address. These changes can make callbacks begin firing after the job was funded; because only the provider can select the receiver, this is provider-controlled risk.
 - **Pending-claim refund blocking is bounded griefing:** a provider's pending claim blocks `claimRefund` on a Funded job past expiry, but on non-hooked jobs the client can always clear it with `rejectClaim` and refund in the next transaction. On hooked jobs a reverting `rejectClaim` hook can keep the claim pinned; clients accepting a hook accept this as part of the job's policy.
 - **Consumed claim hashes:** rejected or withdrawn claim tuples remain consumed, so a rejected claim cannot be silently refiled and later approved; a refile must visibly differ in `cumulativeAmount`, `deliverable`, or `optParams`.
@@ -563,7 +564,7 @@ function DOMAIN_SEPARATOR() external view returns (bytes32);
 - **Tokens:** Use SafeERC-20 or equivalent for [ERC-20](./eip-20.md).
 - **Evaluator:** MUST be set at creation; if "client completes", pass `evaluator = client`.
 - **Hook gas limits** (for hooked implementations): Implementations SHOULD impose a gas limit on hook calls (e.g. `call{gas: HOOK_GAS_LIMIT}(...)`) to bound execution cost and prevent hooks from consuming unbounded gas. The specific limit is left to the implementation as gas costs vary across chains.
-- Hook contracts are client-supplied and trusted by the client; implementations MUST NOT allow hooks to modify core escrow state directly. Where `claimRefund` is hookable (as in the reference implementation), a reverting hook can block refunds after expiry. The reference implementation accepts this under a governance trust model: hooks are admin-whitelisted only after an audit that they do not block lifecycle paths (and do not act on caller-supplied `optParams` on the permissionless `claimRefund` path), with an admin `forceRefund` (refund + expire in one step, hooks bypassed, only under `pause()`) as the on-chain break-glass recovery (and `batchDetachHook` for non-forwarding hooks). A rescue MUST close the job's accounting atomically with the payout so a rescued job cannot be refunded twice; a free-form escape hatch like `emergencyWithdraw` SHOULD be reserved for funds not attributed to any job. Implementations requiring an unconditional, trust-minimized post-expiry refund SHALL keep `claimRefund` non-hookable.
+- Hook contracts are client-supplied and trusted by the client; implementations MUST NOT allow hooks to modify core escrow state directly. Where `claimRefund` is hookable (as in the reference implementation), a reverting hook can block refunds after expiry; see [Hook security](#hook-security) for the whitelist-audit and break-glass mitigations. Any rescue path MUST close the job's accounting atomically with the payout so a rescued job cannot be refunded twice; a free-form escape hatch like `emergencyWithdraw` SHOULD be reserved for funds not attributed to any job. Implementations requiring an unconditional, trust-minimized post-expiry refund SHALL keep `claimRefund` non-hookable.
 - Jobs that use **advanced hooks** (e.g. two‑phase escrow / fund‑transfer hooks that custody additional tokens) are expected to have **more revert paths and tighter coupling** to external logic than plain, non‑hooked Agentic Commerce jobs. Such hooks SHOULD be reserved for agents and users who understand and accept this trade‑off; for most simple jobs, a non‑hooked or policy‑only hook is RECOMMENDED.
 
 ## Copyright

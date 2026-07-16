@@ -1697,6 +1697,33 @@ contract ERC8183Test is Test {
         assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Expired));
     }
 
+    // A rescue must be distinguishable from a normal refund in the event stream alone.
+    function test_forceRefund_emitsForceRefundedForAttribution() public {
+        SelectiveRevertHook hook = new SelectiveRevertHook(ERC8183.claimRefund.selector);
+        vm.prank(deployer);
+        core.setHookWhitelist(address(hook), true);
+
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, _futureExpiry(), "hooked", address(hook), 0, "");
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TEN_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, address(usdc), TEN_USDC, "");
+
+        vm.warp(block.timestamp + 3601);
+
+        address beneficiary = makeAddr("ultimateBeneficiary");
+        vm.startPrank(deployer);
+        core.pause();
+
+        vm.expectEmit(true, true, false, true);
+        emit ERC8183.Refunded(jobId, beneficiary, TEN_USDC);
+        vm.expectEmit(true, true, true, true);
+        emit ERC8183.ForceRefunded(jobId, deployer, beneficiary, TEN_USDC);
+        core.forceRefund(jobId, beneficiary);
+        vm.stopPrank();
+    }
+
     function test_forceRefund_revertsWhenNotPaused() public {
         uint256 jobId = _createFundedJob(TEN_USDC);
         vm.warp(block.timestamp + 3601);
