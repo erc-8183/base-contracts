@@ -68,7 +68,7 @@ contracts/
 - **Pending claim resolution** — after expiry, a Funded job with a pending provider claim cannot be force-refunded until the claim is approved, rejected, or withdrawn; if all parties stay idle, escrow remains parked
 - **Claim replay guard** — rejected claim hashes stay consumed, so providers must vary `cumulativeAmount`, the deliverable, or `optParams` to refile
 - **Authorization extension** — `ERC8183WithAuthorization` uses the base `ERC8183` EIP-712 domain so relayed entrypoints extend the same protocol identity; signers can call `cancelAuthorization` directly to burn one of their own outstanding nonces
-- **Hook safety** — `claimRefund` is intentionally not hookable; pending claims must be resolved before refund
+- **Hook safety** — `claimRefund` is hookable and intentionally blocking: the refund is paid to `job.client` (which may be a contract) and the `afterAction` hook runs after the transfer so a contract-client can atomically forward funds to the real beneficiary. The trade-off (a reverting hook can block the permissionless refund) is handled by governance: hooks are whitelisted only after an audit that they don't block lifecycle paths, with admin `pause()` + `forceRefund` as the on-chain break-glass — it pays the refund (to the client, or to an admin-chosen recipient when the client is itself an intermediary contract that cannot receive funds without its blocked hook) and expires the job in one step, bypassing hooks, so a rescued job can never be refunded twice (`emergencyWithdraw` is reserved for funds not attributed to any job). Pending claims must still be resolved before refund
 
 See [docs/01-architecture.md](docs/01-architecture.md) for state machine and sequence diagrams.
 

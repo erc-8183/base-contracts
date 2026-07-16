@@ -21,13 +21,13 @@ contract ERC8183WithAuthorizationTest is Test {
     bytes32 constant EIP712_DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
     bytes32 constant CREATE_JOB_AUTHORIZATION_TYPEHASH = keccak256(
-        "CreateJobAuthorization(address signer,address provider,address evaluator,uint48 expiredAt,bytes32 descriptionHash,address hook,uint256 providerAgentId,uint72 nonce,uint256 deadline)"
+        "CreateJobAuthorization(address signer,address provider,address evaluator,uint48 expiredAt,bytes32 descriptionHash,address hook,uint256 providerAgentId,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
     bytes32 constant SET_PAYOUT_RECEIVER_AUTHORIZATION_TYPEHASH = keccak256(
-        "SetPayoutReceiverAuthorization(address signer,uint256 jobId,address payoutReceiver,uint72 nonce,uint256 deadline)"
+        "SetPayoutReceiverAuthorization(address signer,uint256 jobId,address payoutReceiver,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
     bytes32 constant SET_PROVIDER_AUTHORIZATION_TYPEHASH = keccak256(
-        "SetProviderAuthorization(address signer,uint256 jobId,address provider,uint256 agentId,uint72 nonce,uint256 deadline)"
+        "SetProviderAuthorization(address signer,uint256 jobId,address provider,uint256 agentId,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
     );
     bytes32 constant SET_BUDGET_AUTHORIZATION_TYPEHASH = keccak256(
         "SetBudgetAuthorization(address signer,uint256 jobId,address token,uint256 amount,bytes32 optParamsHash,uint72 nonce,uint256 deadline)"
@@ -71,7 +71,7 @@ contract ERC8183WithAuthorizationTest is Test {
 
     event AuthorizationUsed(address indexed signer, bytes32 indexed nonce);
     event AuthorizationCanceled(address indexed signer, bytes32 indexed nonce);
-    event PayoutReceiverSet(uint256 indexed jobId, address indexed payoutReceiver);
+    event PayoutReceiverSet(uint256 indexed jobId, address indexed actor, address indexed payoutReceiver);
     event ClaimSubmitted(
         uint256 indexed jobId,
         address indexed provider,
@@ -186,7 +186,8 @@ contract ERC8183WithAuthorizationTest is Test {
                 expiredAt: expiredAt,
                 description: description,
                 hook: hook,
-                providerAgentId: providerAgentId
+                providerAgentId: providerAgentId,
+                optParams: ""
             });
     }
 
@@ -214,6 +215,7 @@ contract ERC8183WithAuthorizationTest is Test {
                     _hashString(description),
                     hook,
                     providerAgentId,
+                    _hashBytes(""),
                     nonce,
                     deadline
                 )
@@ -226,13 +228,22 @@ contract ERC8183WithAuthorizationTest is Test {
         address signer,
         uint256 jobId,
         address payoutReceiver,
+        bytes memory optParams,
         uint72 nonce,
         uint256 deadline
     ) internal view returns (bytes memory) {
         return _sign(
             signerPk,
             keccak256(
-                abi.encode(SET_PAYOUT_RECEIVER_AUTHORIZATION_TYPEHASH, signer, jobId, payoutReceiver, nonce, deadline)
+                abi.encode(
+                    SET_PAYOUT_RECEIVER_AUTHORIZATION_TYPEHASH,
+                    signer,
+                    jobId,
+                    payoutReceiver,
+                    _hashBytes(optParams),
+                    nonce,
+                    deadline
+                )
             )
         );
     }
@@ -243,13 +254,23 @@ contract ERC8183WithAuthorizationTest is Test {
         uint256 jobId,
         address provider_,
         uint256 agentId,
+        bytes memory optParams,
         uint72 nonce,
         uint256 deadline
     ) internal view returns (bytes memory) {
         return _sign(
             signerPk,
             keccak256(
-                abi.encode(SET_PROVIDER_AUTHORIZATION_TYPEHASH, signer, jobId, provider_, agentId, nonce, deadline)
+                abi.encode(
+                    SET_PROVIDER_AUTHORIZATION_TYPEHASH,
+                    signer,
+                    jobId,
+                    provider_,
+                    agentId,
+                    _hashBytes(optParams),
+                    nonce,
+                    deadline
+                )
             )
         );
     }
@@ -493,7 +514,7 @@ contract ERC8183WithAuthorizationTest is Test {
 
     function _createFundedJob() internal returns (uint256 jobId) {
         vm.prank(client);
-        jobId = core.createJob(provider, evaluator, _futureExpiry(), "claim auth job", address(0), 0);
+        jobId = core.createJob(provider, evaluator, _futureExpiry(), "claim auth job", address(0), 0, "");
         vm.prank(provider);
         core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
         vm.prank(client);
@@ -699,45 +720,135 @@ contract ERC8183WithAuthorizationTest is Test {
 
         assertEq(core.SET_PAYOUT_RECEIVER_AUTHORIZATION_TYPEHASH(), SET_PAYOUT_RECEIVER_AUTHORIZATION_TYPEHASH);
 
-        bytes memory clientSig = _signSetPayoutReceiver(clientPk, client, jobId, plainReceiver, 2, deadline);
+        bytes memory clientSig = _signSetPayoutReceiver(clientPk, client, jobId, plainReceiver, "", 2, deadline);
         vm.expectRevert(ERC8183.Unauthorized.selector);
         vm.prank(relayer);
-        core.setPayoutReceiverWithAuthorization(jobId, plainReceiver, _auth(client, 2, deadline, clientSig));
+        core.setPayoutReceiverWithAuthorization(jobId, plainReceiver, "", _auth(client, 2, deadline, clientSig));
 
-        bytes memory providerSig = _signSetPayoutReceiver(providerPk, provider, jobId, plainReceiver, 3, deadline);
+        bytes memory providerSig = _signSetPayoutReceiver(providerPk, provider, jobId, plainReceiver, "", 3, deadline);
         vm.expectEmit(true, true, true, true, address(core));
         emit AuthorizationUsed(provider, _packNonce(provider, 3));
         vm.expectEmit(true, true, true, true, address(core));
-        emit PayoutReceiverSet(jobId, plainReceiver);
+        emit PayoutReceiverSet(jobId, provider, plainReceiver);
         vm.prank(relayer);
-        core.setPayoutReceiverWithAuthorization(jobId, plainReceiver, _auth(provider, 3, deadline, providerSig));
+        core.setPayoutReceiverWithAuthorization(jobId, plainReceiver, "", _auth(provider, 3, deadline, providerSig));
 
         assertEq(core.getJob(jobId).payoutReceiver, plainReceiver);
 
         _relaySetBudget(jobId, 4, deadline);
         _relayFund(jobId, 5, deadline);
 
-        bytes memory lockedSig = _signSetPayoutReceiver(providerPk, provider, jobId, secondReceiver, 6, deadline);
+        bytes memory lockedSig = _signSetPayoutReceiver(providerPk, provider, jobId, secondReceiver, "", 6, deadline);
         vm.expectRevert(ERC8183.WrongStatus.selector);
         vm.prank(relayer);
-        core.setPayoutReceiverWithAuthorization(jobId, secondReceiver, _auth(provider, 6, deadline, lockedSig));
+        core.setPayoutReceiverWithAuthorization(jobId, secondReceiver, "", _auth(provider, 6, deadline, lockedSig));
+    }
+
+    function test_setPayoutReceiverWithAuthorization_bindsOptParams() public {
+        uint48 expiry = _futureExpiry();
+        uint256 deadline = _deadline();
+        uint256 jobId = _relayCreateJob(client, clientPk, provider, evaluator, expiry, "receiver optparams", 1, deadline);
+        address receiver = makeAddr("optParamsReceiver");
+
+        // Signature over optParams = 0x01; relaying with 0x02 must fail.
+        bytes memory sig = _signSetPayoutReceiver(providerPk, provider, jobId, receiver, hex"01", 2, deadline);
+        vm.prank(relayer);
+        vm.expectRevert(ERC8183WithAuthorization.InvalidAuthorizationSignature.selector);
+        core.setPayoutReceiverWithAuthorization(jobId, receiver, hex"02", _auth(provider, 2, deadline, sig));
+
+        // Matching optParams succeeds.
+        vm.prank(relayer);
+        core.setPayoutReceiverWithAuthorization(jobId, receiver, hex"01", _auth(provider, 2, deadline, sig));
+        assertEq(core.getJob(jobId).payoutReceiver, receiver);
+    }
+
+    function test_createJobWithAuthorization_bindsOptParams() public {
+        uint48 expiry = _futureExpiry();
+        uint256 deadline = _deadline();
+        string memory description = "createjob optparams";
+
+        // Sign over optParams = 0x01.
+        bytes memory sig = _sign(
+            clientPk,
+            keccak256(
+                abi.encode(
+                    CREATE_JOB_AUTHORIZATION_TYPEHASH,
+                    client,
+                    provider,
+                    evaluator,
+                    expiry,
+                    _hashString(description),
+                    address(0),
+                    uint256(0),
+                    _hashBytes(hex"01"),
+                    uint72(70),
+                    deadline
+                )
+            )
+        );
+
+        ERC8183WithAuthorization.CreateJobAuthorizationParams memory paramsWrong = ERC8183WithAuthorization
+            .CreateJobAuthorizationParams({
+            provider: provider,
+            evaluator: evaluator,
+            expiredAt: expiry,
+            description: description,
+            hook: address(0),
+            providerAgentId: 0,
+            optParams: hex"02"
+        });
+        vm.prank(relayer);
+        vm.expectRevert(ERC8183WithAuthorization.InvalidAuthorizationSignature.selector);
+        core.createJobWithAuthorization(paramsWrong, _auth(client, 70, deadline, sig));
+
+        ERC8183WithAuthorization.CreateJobAuthorizationParams memory paramsRight = ERC8183WithAuthorization
+            .CreateJobAuthorizationParams({
+            provider: provider,
+            evaluator: evaluator,
+            expiredAt: expiry,
+            description: description,
+            hook: address(0),
+            providerAgentId: 0,
+            optParams: hex"01"
+        });
+        vm.prank(relayer);
+        uint256 jobId = core.createJobWithAuthorization(paramsRight, _auth(client, 70, deadline, sig));
+        assertEq(core.getJob(jobId).provider, provider);
     }
 
     function test_relaysClientAuthorizedSetProvider() public {
         vm.prank(client);
-        uint256 jobId = core.createJob(address(0), evaluator, _futureExpiry(), "late provider", address(0), 0);
+        uint256 jobId = core.createJob(address(0), evaluator, _futureExpiry(), "late provider", address(0), 0, "");
         uint256 deadline = _deadline();
         uint256 agentId = 7;
-        bytes memory sig = _signSetProvider(clientPk, client, jobId, provider, agentId, 61, deadline);
+        bytes memory sig = _signSetProvider(clientPk, client, jobId, provider, agentId, "", 61, deadline);
 
         vm.expectEmit(true, true, true, true, address(core));
         emit AuthorizationUsed(client, _packNonce(client, 61));
         vm.prank(relayer);
-        core.setProviderWithAuthorization(jobId, provider, agentId, _auth(client, 61, deadline, sig));
+        core.setProviderWithAuthorization(jobId, provider, agentId, "", _auth(client, 61, deadline, sig));
 
         assertEq(core.getJob(jobId).provider, provider);
         assertEq(core.getJob(jobId).providerAgentId, agentId);
         assertTrue(core.authorizationNonceUsed(_packNonce(client, 61)));
+    }
+
+    function test_setProviderWithAuthorization_bindsOptParams() public {
+        vm.prank(client);
+        uint256 jobId = core.createJob(address(0), evaluator, _futureExpiry(), "late provider", address(0), 0, "");
+        uint256 deadline = _deadline();
+        uint256 agentId = 7;
+
+        // Signature is over optParams = 0x01; relaying with 0x02 must fail.
+        bytes memory sig = _signSetProvider(clientPk, client, jobId, provider, agentId, hex"01", 62, deadline);
+        vm.prank(relayer);
+        vm.expectRevert(ERC8183WithAuthorization.InvalidAuthorizationSignature.selector);
+        core.setProviderWithAuthorization(jobId, provider, agentId, hex"02", _auth(client, 62, deadline, sig));
+
+        // Matching optParams succeeds and records the signer as actor.
+        vm.prank(relayer);
+        core.setProviderWithAuthorization(jobId, provider, agentId, hex"01", _auth(client, 62, deadline, sig));
+        assertEq(core.getJob(jobId).provider, provider);
     }
 
     function test_relaysEvaluatorAuthorizedReject() public {

@@ -6,6 +6,7 @@ import {Vm} from "forge-std/Vm.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
 import {ERC8183} from "../contracts/ERC8183.sol";
 import {IERC8183Hook} from "../contracts/IERC8183Hook.sol";
@@ -46,6 +47,96 @@ contract PendingClaimObserverHook is IERC8183Hook {
     }
 }
 
+/// @notice Records before/after hook invocations for assertions.
+contract RecordingHook is IERC8183Hook {
+    bytes4 public lastSelector;
+    uint256 public beforeCount;
+    uint256 public afterCount;
+    bytes public lastData;
+
+    function beforeAction(uint256, bytes4 selector, bytes calldata data) external override {
+        lastSelector = selector;
+        beforeCount++;
+        lastData = data;
+    }
+
+    function afterAction(uint256, bytes4 selector, bytes calldata data) external override {
+        lastSelector = selector;
+        afterCount++;
+        lastData = data;
+    }
+
+    function supportsInterface(bytes4 id) external pure override returns (bool) {
+        return id == type(IERC8183Hook).interfaceId || id == type(IERC165).interfaceId;
+    }
+}
+
+/// @notice Reverts only on a single configured selector — lets other lifecycle calls
+///         (e.g. createJob/setBudget/fund) proceed while gating one specific action.
+contract SelectiveRevertHook is IERC8183Hook {
+    bytes4 public immutable blockedSelector;
+
+    constructor(bytes4 blockedSelector_) {
+        blockedSelector = blockedSelector_;
+    }
+
+    function beforeAction(uint256, bytes4 selector, bytes calldata) external view override {
+        if (selector == blockedSelector) revert("blocked");
+    }
+
+    function afterAction(uint256, bytes4 selector, bytes calldata) external view override {
+        if (selector == blockedSelector) revert("blocked");
+    }
+
+    function supportsInterface(bytes4 id) external pure override returns (bool) {
+        return id == type(IERC8183Hook).interfaceId || id == type(IERC165).interfaceId;
+    }
+}
+
+/// @notice A contract client that also acts as its own hook: on claimRefund it atomically
+///         forwards the refunded escrow to the real end-beneficiary. Models the intended
+///         reason claimRefund hooks are blocking — a failed forward must roll back the
+///         entire refund so funds are never stranded in this intermediary.
+contract ForwardingClient is IERC8183Hook {
+    ERC8183 immutable core;
+    MockUSDC immutable token;
+    address public beneficiary;
+    bool public failForward;
+
+    constructor(ERC8183 core_, MockUSDC token_, address beneficiary_) {
+        core = core_;
+        token = token_;
+        beneficiary = beneficiary_;
+    }
+
+    function setFailForward(bool v) external {
+        failForward = v;
+    }
+
+    function createJob(address provider, address evaluator, uint48 expiry) external returns (uint256) {
+        return core.createJob(provider, evaluator, expiry, "forwarded", address(this), 0, "");
+    }
+
+    function fund(uint256 jobId, uint256 amount) external {
+        token.approve(address(core), amount);
+        core.fund(jobId, address(token), amount, "");
+    }
+
+    function beforeAction(uint256, bytes4, bytes calldata) external override {}
+
+    function afterAction(uint256, bytes4 selector, bytes calldata) external override {
+        if (selector == ERC8183.claimRefund.selector) {
+            require(!failForward, "forward failed");
+            uint256 bal = token.balanceOf(address(this));
+            if (bal > 0) require(token.transfer(beneficiary, bal), "transfer failed");
+        }
+    }
+
+    function supportsInterface(bytes4 id) external pure override returns (bool) {
+        return id == type(IERC8183Hook).interfaceId || id == type(IERC165).interfaceId;
+    }
+}
+
 /// @notice Image Generation — E2E flow (no hook, core-only payment).
 ///         Mirrors the original Hardhat suite in test/ERC8183.test.js.
 contract ERC8183Test is Test {
@@ -63,13 +154,13 @@ contract ERC8183Test is Test {
     address evaluator = makeAddr("evaluator");
 
     // Events (must match ERC8183.sol exactly for vm.expectEmit)
-    event ProviderSet(uint256 indexed jobId, address indexed provider, uint256 agentId);
-    event BudgetSet(uint256 indexed jobId, address indexed token, uint256 amount);
+    event ProviderSet(uint256 indexed jobId, address indexed actor, address indexed provider, uint256 agentId);
+    event BudgetSet(uint256 indexed jobId, address indexed actor, address indexed token, uint256 amount);
     event JobFunded(uint256 indexed jobId, address indexed client, uint256 amount);
     event JobSubmitted(uint256 indexed jobId, address indexed provider, bytes32 deliverable);
     event JobCompleted(uint256 indexed jobId, address indexed evaluator, bytes32 reason);
     event PaymentReleased(uint256 indexed jobId, address indexed recipient, uint256 amount);
-    event PayoutReceiverSet(uint256 indexed jobId, address indexed payoutReceiver);
+    event PayoutReceiverSet(uint256 indexed jobId, address indexed actor, address indexed payoutReceiver);
     event Disbursed(uint256 indexed jobId, address indexed receiver, bytes4 selector, uint256 amount);
     event PaymentTokenAllowlistUpdated(address indexed token, bool status);
     event Settled(uint256 indexed jobId, uint256 cumulativeAmount, uint256 delta);
@@ -119,10 +210,10 @@ contract ERC8183Test is Test {
 
     function _createFundedJob(uint256 amount, address payoutReceiver) internal returns (uint256 jobId) {
         vm.prank(client);
-        jobId = core.createJob(provider, evaluator, _futureExpiry(), "claim job", address(0), 0);
+        jobId = core.createJob(provider, evaluator, _futureExpiry(), "claim job", address(0), 0, "");
         if (payoutReceiver != address(0)) {
             vm.prank(provider);
-            core.setPayoutReceiver(jobId, payoutReceiver);
+            core.setPayoutReceiver(jobId, payoutReceiver, "");
         }
         vm.prank(provider);
         core.setBudget(jobId, address(usdc), amount, "");
@@ -184,7 +275,7 @@ contract ERC8183Test is Test {
 
         // Job 1: paid in USDC
         vm.prank(client);
-        core.createJob(provider, evaluator, expiry, "Job paid in USDC", address(0), 0);
+        core.createJob(provider, evaluator, expiry, "Job paid in USDC", address(0), 0, "");
         uint256 jobId1 = 1;
         vm.prank(provider);
         core.setBudget(jobId1, address(usdc), TWENTY_USDC, "");
@@ -192,7 +283,7 @@ contract ERC8183Test is Test {
 
         // Job 2: paid in cbBTC
         vm.prank(client);
-        core.createJob(provider, evaluator, expiry, "Job paid in cbBTC", address(0), 0);
+        core.createJob(provider, evaluator, expiry, "Job paid in cbBTC", address(0), 0, "");
         uint256 jobId2 = 2;
         vm.prank(provider);
         core.setBudget(jobId2, address(cbbtc), ONE_CBBTC, "");
@@ -233,25 +324,25 @@ contract ERC8183Test is Test {
 
         // createJob with agentId when provider is known
         vm.prank(client);
-        core.createJob(provider, evaluator, expiry, "Job with agentId", address(0), AGENT_ID);
+        core.createJob(provider, evaluator, expiry, "Job with agentId", address(0), AGENT_ID, "");
         assertEq(core.getJob(1).providerAgentId, AGENT_ID);
 
         // createJob without provider: agentId should be 0 even if a non-zero value is passed
         vm.prank(client);
-        core.createJob(address(0), evaluator, expiry, "Job without provider", address(0), 99);
+        core.createJob(address(0), evaluator, expiry, "Job without provider", address(0), 99, "");
         assertEq(core.getJob(2).providerAgentId, 0);
 
         uint256 AGENT_ID_2 = 7;
         vm.expectEmit(true, true, true, true, address(core));
-        emit ProviderSet(2, provider, AGENT_ID_2);
+        emit ProviderSet(2, client, provider, AGENT_ID_2);
         vm.prank(client);
-        core.setProvider(2, provider, AGENT_ID_2);
+        core.setProvider(2, provider, AGENT_ID_2, "");
 
         assertEq(core.getJob(2).providerAgentId, AGENT_ID_2);
 
         // agentId = 0 is valid
         vm.prank(client);
-        core.createJob(provider, evaluator, expiry, "No agentId", address(0), 0);
+        core.createJob(provider, evaluator, expiry, "No agentId", address(0), 0, "");
         assertEq(core.getJob(3).providerAgentId, 0);
     }
 
@@ -260,11 +351,48 @@ contract ERC8183Test is Test {
     // ──────────────────────────────────────────────────────────
     function test_setProvider_RevertsWhenProviderIsClient() public {
         vm.prank(client);
-        core.createJob(address(0), evaluator, _futureExpiry(), "Job without provider", address(0), 0);
+        core.createJob(address(0), evaluator, _futureExpiry(), "Job without provider", address(0), 0, "");
 
         vm.prank(client);
         vm.expectRevert(ERC8183.ClientCannotBeProvider.selector);
-        core.setProvider(1, client, 0);
+        core.setProvider(1, client, 0, "");
+    }
+
+    // setProvider fires before + after hooks with the encoded payload
+    function test_setProvider_firesBeforeAndAfterHooks() public {
+        RecordingHook hook = new RecordingHook();
+        vm.prank(deployer);
+        core.setHookWhitelist(address(hook), true);
+
+        vm.prank(client);
+        core.createJob(address(0), evaluator, _futureExpiry(), "hooked", address(hook), 0, "");
+
+        // createJob already fired afterAction; assert the setProvider delta specifically.
+        uint256 beforeBefore = hook.beforeCount();
+        uint256 afterBefore = hook.afterCount();
+        vm.prank(client);
+        core.setProvider(1, provider, 7, hex"beef");
+
+        assertEq(hook.lastSelector(), core.setProvider.selector);
+        assertEq(hook.beforeCount(), beforeBefore + 1);
+        assertEq(hook.afterCount(), afterBefore + 1);
+        assertEq(hook.lastData(), abi.encode(client, provider, uint256(7), bytes(hex"beef")));
+    }
+
+    // a reverting before hook gates the transition
+    function test_setProvider_beforeHookRevertGates() public {
+        SelectiveRevertHook hook = new SelectiveRevertHook(ERC8183.setProvider.selector);
+        vm.prank(deployer);
+        core.setHookWhitelist(address(hook), true);
+
+        vm.prank(client);
+        core.createJob(address(0), evaluator, _futureExpiry(), "hooked", address(hook), 0, "");
+
+        vm.prank(client);
+        vm.expectRevert(bytes("blocked"));
+        core.setProvider(1, provider, 0, "");
+
+        assertEq(core.getJob(1).provider, address(0));
     }
 
     // ──────────────────────────────────────────────────────────
@@ -275,7 +403,7 @@ contract ERC8183Test is Test {
 
         // Step 1: create job
         vm.prank(client);
-        core.createJob(provider, evaluator, expiry, "Generate a beautiful landscape wallpaper image", address(0), 0);
+        core.createJob(provider, evaluator, expiry, "Generate a beautiful landscape wallpaper image", address(0), 0, "");
         uint256 jobId = 1;
 
         ERC8183.Job memory job = core.getJob(jobId);
@@ -286,7 +414,7 @@ contract ERC8183Test is Test {
 
         // Step 2: provider sets budget — expect BudgetSet event
         vm.expectEmit(true, true, true, true, address(core));
-        emit BudgetSet(jobId, address(usdc), TWENTY_USDC);
+        emit BudgetSet(jobId, provider, address(usdc), TWENTY_USDC);
         vm.prank(provider);
         core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
 
@@ -341,7 +469,7 @@ contract ERC8183Test is Test {
         uint48 expiry = _futureExpiry();
 
         vm.prank(client);
-        core.createJob(provider, evaluator, expiry, "grace period test", address(0), 0);
+        core.createJob(provider, evaluator, expiry, "grace period test", address(0), 0, "");
         uint256 jobId = 1;
 
         vm.prank(provider);
@@ -357,7 +485,7 @@ contract ERC8183Test is Test {
         // Move past expiry but within grace period
         vm.warp(uint256(expiry) + 1);
         vm.expectRevert(ERC8183.GracePeriodActive.selector);
-        core.claimRefund(jobId);
+        core.claimRefund(jobId, "");
 
         // Evaluator can still complete during grace period
         vm.prank(evaluator);
@@ -373,7 +501,7 @@ contract ERC8183Test is Test {
         uint48 expiry = _futureExpiry();
 
         vm.prank(client);
-        core.createJob(provider, evaluator, expiry, "grace expiry test", address(0), 0);
+        core.createJob(provider, evaluator, expiry, "grace expiry test", address(0), 0, "");
         uint256 jobId = 1;
 
         vm.prank(provider);
@@ -385,7 +513,7 @@ contract ERC8183Test is Test {
 
         // Move past expiry + grace period (1 hour)
         vm.warp(uint256(expiry) + 3601);
-        core.claimRefund(jobId);
+        core.claimRefund(jobId, "");
         assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Expired));
         assertEq(usdc.balanceOf(client), TWENTY_USDC);
     }
@@ -398,7 +526,7 @@ contract ERC8183Test is Test {
 
         uint48 expiry = _futureExpiry();
         vm.prank(client);
-        core.createJob(provider, evaluator, expiry, "test", address(0), 0);
+        core.createJob(provider, evaluator, expiry, "test", address(0), 0, "");
         uint256 jobId = 1;
 
         vm.expectRevert(ERC8183.PaymentTokenNotAllowed.selector);
@@ -454,7 +582,7 @@ contract ERC8183Test is Test {
 
         uint48 expiry = _futureExpiry();
         vm.prank(client);
-        core.createJob(provider, evaluator, expiry, "fot", address(0), 0);
+        core.createJob(provider, evaluator, expiry, "fot", address(0), 0, "");
         uint256 jobId = 1;
 
         vm.prank(provider);
@@ -479,7 +607,7 @@ contract ERC8183Test is Test {
         cbbtc.approve(address(core), TWENTY_USDC);
 
         vm.prank(client);
-        uint256 jobId = core.createJob(provider, evaluator, _futureExpiry(), "token swap", address(0), 0);
+        uint256 jobId = core.createJob(provider, evaluator, _futureExpiry(), "token swap", address(0), 0, "");
 
         vm.prank(provider);
         core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
@@ -502,7 +630,7 @@ contract ERC8183Test is Test {
         uint48 expiry = _futureExpiry();
 
         vm.prank(client);
-        core.createJob(provider, evaluator, expiry, "no grace test", address(0), 0);
+        core.createJob(provider, evaluator, expiry, "no grace test", address(0), 0, "");
         uint256 jobId = 1;
 
         vm.prank(provider);
@@ -512,7 +640,7 @@ contract ERC8183Test is Test {
         // NOT submitted - stays Funded
 
         vm.warp(uint256(expiry) + 1);
-        core.claimRefund(jobId);
+        core.claimRefund(jobId, "");
         assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Expired));
         assertEq(usdc.balanceOf(client), TWENTY_USDC);
     }
@@ -717,31 +845,31 @@ contract ERC8183Test is Test {
 
     function test_payoutReceiver_RevertsWhenReceiverIsEscrow() public {
         vm.prank(client);
-        core.createJob(provider, evaluator, _futureExpiry(), "setter self receiver", address(0), 0);
+        core.createJob(provider, evaluator, _futureExpiry(), "setter self receiver", address(0), 0, "");
 
         vm.expectRevert(ERC8183.InvalidReceiver.selector);
         vm.prank(provider);
-        core.setPayoutReceiver(1, address(core));
+        core.setPayoutReceiver(1, address(core), "");
     }
 
     function test_payoutReceiver_RevertsWhenReceiverIsPaymentTokenAfterBudget() public {
         vm.prank(client);
-        uint256 jobId = core.createJob(provider, evaluator, _futureExpiry(), "receiver token", address(0), 0);
+        uint256 jobId = core.createJob(provider, evaluator, _futureExpiry(), "receiver token", address(0), 0, "");
 
         vm.prank(provider);
         core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
 
         vm.expectRevert(ERC8183.InvalidReceiver.selector);
         vm.prank(provider);
-        core.setPayoutReceiver(jobId, address(usdc));
+        core.setPayoutReceiver(jobId, address(usdc), "");
     }
 
     function test_setBudget_RevertsWhenExistingReceiverIsPaymentToken() public {
         vm.prank(client);
-        uint256 jobId = core.createJob(provider, evaluator, _futureExpiry(), "budget token receiver", address(0), 0);
+        uint256 jobId = core.createJob(provider, evaluator, _futureExpiry(), "budget token receiver", address(0), 0, "");
 
         vm.prank(provider);
-        core.setPayoutReceiver(jobId, address(usdc));
+        core.setPayoutReceiver(jobId, address(usdc), "");
 
         vm.expectRevert(ERC8183.InvalidReceiver.selector);
         vm.prank(provider);
@@ -753,17 +881,17 @@ contract ERC8183Test is Test {
         uint48 expiry = _futureExpiry();
 
         vm.prank(client);
-        uint256 jobId = core.createJob(provider, evaluator, expiry, "refund receiver", address(0), 0);
+        uint256 jobId = core.createJob(provider, evaluator, expiry, "refund receiver", address(0), 0, "");
 
         vm.prank(provider);
-        core.setPayoutReceiver(jobId, payoutReceiver);
+        core.setPayoutReceiver(jobId, payoutReceiver, "");
         vm.prank(provider);
         core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
         vm.prank(client);
         core.fund(jobId, address(usdc), TWENTY_USDC, "");
 
         vm.warp(uint256(expiry) + 1);
-        core.claimRefund(jobId);
+        core.claimRefund(jobId, "");
 
         assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Expired));
         assertEq(usdc.balanceOf(client), TWENTY_USDC);
@@ -778,32 +906,32 @@ contract ERC8183Test is Test {
         uint48 expiry = _futureExpiry();
 
         vm.prank(client);
-        core.createJob(provider, evaluator, expiry, "setter test", address(0), 0);
+        core.createJob(provider, evaluator, expiry, "setter test", address(0), 0, "");
         uint256 jobId = 1;
 
         vm.expectRevert(ERC8183.Unauthorized.selector);
         vm.prank(client);
-        core.setPayoutReceiver(jobId, address(disburser));
+        core.setPayoutReceiver(jobId, address(disburser), "");
 
         vm.expectEmit(true, true, true, true, address(core));
-        emit PayoutReceiverSet(jobId, address(plainReceiver));
+        emit PayoutReceiverSet(jobId, provider, address(plainReceiver));
         vm.prank(provider);
-        core.setPayoutReceiver(jobId, address(plainReceiver));
+        core.setPayoutReceiver(jobId, address(plainReceiver), "");
 
         vm.expectEmit(true, true, true, true, address(core));
-        emit PayoutReceiverSet(jobId, address(disburser));
+        emit PayoutReceiverSet(jobId, provider, address(disburser));
         vm.prank(provider);
-        core.setPayoutReceiver(jobId, address(disburser));
+        core.setPayoutReceiver(jobId, address(disburser), "");
         assertEq(core.getJob(jobId).payoutReceiver, address(disburser));
 
         vm.expectEmit(true, true, true, true, address(core));
-        emit PayoutReceiverSet(jobId, address(0));
+        emit PayoutReceiverSet(jobId, provider, address(0));
         vm.prank(provider);
-        core.setPayoutReceiver(jobId, address(0));
+        core.setPayoutReceiver(jobId, address(0), "");
         assertEq(core.getJob(jobId).payoutReceiver, address(0));
 
         vm.prank(provider);
-        core.setPayoutReceiver(jobId, address(disburser));
+        core.setPayoutReceiver(jobId, address(disburser), "");
 
         vm.prank(provider);
         core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
@@ -812,28 +940,28 @@ contract ERC8183Test is Test {
 
         vm.expectRevert(ERC8183.WrongStatus.selector);
         vm.prank(provider);
-        core.setPayoutReceiver(jobId, address(0));
+        core.setPayoutReceiver(jobId, address(0), "");
     }
 
     function test_setPayoutReceiver_RevertsForInvalidJob() public {
         vm.expectRevert(ERC8183.InvalidJob.selector);
         vm.prank(provider);
-        core.setPayoutReceiver(1, address(0));
+        core.setPayoutReceiver(1, address(0), "");
     }
 
     function test_setPayoutReceiver_AssignedProviderCanSetReceiver() public {
         address payoutReceiver = makeAddr("assignedProviderReceiver");
 
         vm.prank(client);
-        core.createJob(address(0), evaluator, _futureExpiry(), "late receiver provider", address(0), 0);
+        core.createJob(address(0), evaluator, _futureExpiry(), "late receiver provider", address(0), 0, "");
 
         vm.prank(client);
-        core.setProvider(1, provider, 0);
+        core.setProvider(1, provider, 0, "");
 
         vm.expectEmit(true, true, true, true, address(core));
-        emit PayoutReceiverSet(1, payoutReceiver);
+        emit PayoutReceiverSet(1, provider, payoutReceiver);
         vm.prank(provider);
-        core.setPayoutReceiver(1, payoutReceiver);
+        core.setPayoutReceiver(1, payoutReceiver, "");
 
         assertEq(core.getJob(1).payoutReceiver, payoutReceiver);
     }
@@ -842,12 +970,104 @@ contract ERC8183Test is Test {
         uint48 expiry = _futureExpiry();
 
         vm.prank(client);
-        core.createJob(provider, evaluator, expiry, "expired receiver", address(0), 0);
+        core.createJob(provider, evaluator, expiry, "expired receiver", address(0), 0, "");
 
         vm.warp(uint256(expiry));
         vm.expectRevert(ERC8183.WrongStatus.selector);
         vm.prank(provider);
-        core.setPayoutReceiver(1, makeAddr("lateReceiver"));
+        core.setPayoutReceiver(1, makeAddr("lateReceiver"), "");
+    }
+
+    // setPayoutReceiver fires before + after hooks with the encoded payload
+    function test_setPayoutReceiver_firesBeforeAndAfterHooks() public {
+        RecordingHook hook = new RecordingHook();
+        vm.prank(deployer);
+        core.setHookWhitelist(address(hook), true);
+
+        vm.prank(client);
+        core.createJob(provider, evaluator, _futureExpiry(), "hooked", address(hook), 0, "");
+
+        address receiver = makeAddr("hookReceiver");
+        // createJob already fired afterAction; assert the setPayoutReceiver delta specifically.
+        uint256 beforeBefore = hook.beforeCount();
+        uint256 afterBefore = hook.afterCount();
+        vm.prank(provider);
+        core.setPayoutReceiver(1, receiver, hex"cafe");
+
+        assertEq(hook.lastSelector(), core.setPayoutReceiver.selector);
+        assertEq(hook.beforeCount(), beforeBefore + 1);
+        assertEq(hook.afterCount(), afterBefore + 1);
+        assertEq(hook.lastData(), abi.encode(provider, receiver, bytes(hex"cafe")));
+    }
+
+    // a reverting before hook gates the transition
+    function test_setPayoutReceiver_beforeHookRevertGates() public {
+        SelectiveRevertHook hook = new SelectiveRevertHook(ERC8183.setPayoutReceiver.selector);
+        vm.prank(deployer);
+        core.setHookWhitelist(address(hook), true);
+
+        vm.prank(client);
+        core.createJob(provider, evaluator, _futureExpiry(), "hooked", address(hook), 0, "");
+
+        vm.prank(provider);
+        vm.expectRevert(bytes("blocked"));
+        core.setPayoutReceiver(1, makeAddr("hookReceiver"), "");
+
+        assertEq(core.getJob(1).payoutReceiver, address(0));
+    }
+
+    // createJob fires afterAction only (no beforeAction) and the hook can read the new job
+    function test_createJob_firesAfterHookOnly() public {
+        RecordingHook hook = new RecordingHook();
+        vm.prank(deployer);
+        core.setHookWhitelist(address(hook), true);
+
+        uint48 expiry = _futureExpiry();
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, expiry, "hooked", address(hook), 0, hex"aa");
+
+        assertEq(hook.afterCount(), 1);
+        assertEq(hook.beforeCount(), 0);
+        assertEq(hook.lastSelector(), core.createJob.selector);
+        assertEq(
+            hook.lastData(),
+            abi.encode(client, provider, evaluator, expiry, address(hook), uint256(0), bytes(hex"aa"))
+        );
+        assertGt(jobId, 0);
+    }
+
+    // for a providerless job, the hook payload's agentId is canonicalized to 0, matching storage
+    function test_createJob_providerlessJobCanonicalizesAgentIdInHookPayload() public {
+        RecordingHook hook = new RecordingHook();
+        vm.prank(deployer);
+        core.setHookWhitelist(address(hook), true);
+
+        uint48 expiry = _futureExpiry();
+        // provider == address(0) but a nonzero agentId is supplied.
+        vm.prank(client);
+        uint256 jobId = core.createJob(address(0), evaluator, expiry, "hooked", address(hook), 999, "");
+
+        // Stored agent id is canonicalized to 0...
+        assertEq(core.getJob(jobId).providerAgentId, 0);
+        // ...and the hook payload must agree with storage (not the raw 999).
+        assertEq(
+            hook.lastData(),
+            abi.encode(client, address(0), evaluator, expiry, address(hook), uint256(0), bytes(""))
+        );
+    }
+
+    // a reverting afterAction rejects job creation entirely
+    function test_createJob_afterHookRevertRejectsCreation() public {
+        SelectiveRevertHook hook = new SelectiveRevertHook(ERC8183.createJob.selector);
+        vm.prank(deployer);
+        core.setHookWhitelist(address(hook), true);
+
+        vm.prank(client);
+        vm.expectRevert(bytes("blocked"));
+        core.createJob(provider, evaluator, _futureExpiry(), "hooked", address(hook), 0, "");
+
+        // No job was persisted.
+        assertEq(core.jobCounter(), 0);
     }
 
     function test_complete_RevertsWhenReceiverDisburserRevertsStrictly() public {
@@ -1019,7 +1239,7 @@ contract ERC8183Test is Test {
     function test_claims_SubmitClaimRevertsAtExpiry() public {
         uint48 expiry = _futureExpiry();
         vm.prank(client);
-        uint256 jobId = core.createJob(provider, evaluator, expiry, "expired claim", address(0), 0);
+        uint256 jobId = core.createJob(provider, evaluator, expiry, "expired claim", address(0), 0, "");
         vm.prank(provider);
         core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
         vm.prank(client);
@@ -1036,7 +1256,7 @@ contract ERC8183Test is Test {
     function test_claims_SettleClaimRevertsAtExpiry() public {
         uint48 expiry = _futureExpiry();
         vm.prank(client);
-        uint256 jobId = core.createJob(provider, evaluator, expiry, "expired settlement", address(0), 0);
+        uint256 jobId = core.createJob(provider, evaluator, expiry, "expired settlement", address(0), 0, "");
         vm.prank(provider);
         core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
         vm.prank(client);
@@ -1089,7 +1309,7 @@ contract ERC8183Test is Test {
     function test_claims_DeadPendingClaimCanBeRejectedThenRefunded() public {
         uint48 expiry = _futureExpiry();
         vm.prank(client);
-        uint256 jobId = core.createJob(provider, evaluator, expiry, "dead claim", address(0), 0);
+        uint256 jobId = core.createJob(provider, evaluator, expiry, "dead claim", address(0), 0, "");
         vm.prank(provider);
         core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
         vm.prank(client);
@@ -1110,12 +1330,12 @@ contract ERC8183Test is Test {
 
         vm.warp(uint256(expiry) + 1);
         vm.expectRevert(ERC8183.PendingClaimExists.selector);
-        core.claimRefund(jobId);
+        core.claimRefund(jobId, "");
 
         vm.prank(client);
         core.rejectClaim(jobId, TEN_USDC, deliverable, staleReason, "");
 
-        core.claimRefund(jobId);
+        core.claimRefund(jobId, "");
 
         assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Expired));
         assertEq(core.pendingClaimHash(jobId), bytes32(0));
@@ -1174,7 +1394,7 @@ contract ERC8183Test is Test {
         core.setHookWhitelist(address(hook), true);
 
         vm.prank(client);
-        uint256 jobId = core.createJob(provider, evaluator, _futureExpiry(), "hooked claim job", address(hook), 0);
+        uint256 jobId = core.createJob(provider, evaluator, _futureExpiry(), "hooked claim job", address(hook), 0, "");
         vm.prank(provider);
         core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
         vm.prank(client);
@@ -1273,7 +1493,7 @@ contract ERC8183Test is Test {
     function test_claims_PendingClaimBlocksRefundUntilResolved() public {
         uint48 expiry = _futureExpiry();
         vm.prank(client);
-        uint256 jobId = core.createJob(provider, evaluator, expiry, "pending claim block", address(0), 0);
+        uint256 jobId = core.createJob(provider, evaluator, expiry, "pending claim block", address(0), 0, "");
         vm.prank(provider);
         core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
         vm.prank(client);
@@ -1286,7 +1506,7 @@ contract ERC8183Test is Test {
 
         vm.warp(uint256(expiry) + 30 days);
         vm.expectRevert(ERC8183.PendingClaimExists.selector);
-        core.claimRefund(jobId);
+        core.claimRefund(jobId, "");
 
         vm.prank(evaluator);
         core.approveClaim(jobId, TEN_USDC, deliverable, "");
@@ -1300,7 +1520,7 @@ contract ERC8183Test is Test {
     function test_claims_RejectPendingClaimAfterExpiryThenRefundsRemainingEscrow() public {
         uint48 expiry = _futureExpiry();
         vm.prank(client);
-        uint256 jobId = core.createJob(provider, evaluator, expiry, "pending claim reject", address(0), 0);
+        uint256 jobId = core.createJob(provider, evaluator, expiry, "pending claim reject", address(0), 0, "");
         vm.prank(provider);
         core.setBudget(jobId, address(usdc), TWENTY_USDC, "");
         vm.prank(client);
@@ -1312,16 +1532,278 @@ contract ERC8183Test is Test {
 
         vm.warp(uint256(expiry) + 30 days);
         vm.expectRevert(ERC8183.PendingClaimExists.selector);
-        core.claimRefund(jobId);
+        core.claimRefund(jobId, "");
 
         vm.prank(provider);
         core.rejectClaim(jobId, TEN_USDC, deliverable, bytes32("withdrawn"), "");
 
-        core.claimRefund(jobId);
+        core.claimRefund(jobId, "");
 
         assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Expired));
         assertEq(core.pendingClaimHash(jobId), bytes32(0));
         assertEq(usdc.balanceOf(client), TWENTY_USDC);
         assertEq(usdc.balanceOf(address(core)), 0);
+    }
+
+    // claimRefund fires before + after hooks on the refund path
+    function test_claimRefund_firesBeforeAndAfterHooks() public {
+        RecordingHook hook = new RecordingHook();
+        vm.prank(deployer);
+        core.setHookWhitelist(address(hook), true);
+
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, _futureExpiry(), "hooked", address(hook), 0, "");
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TEN_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, address(usdc), TEN_USDC, "");
+
+        vm.warp(block.timestamp + 3601);
+        // Hook already saw setBudget + fund; assert the claimRefund delta specifically.
+        uint256 beforeBefore = hook.beforeCount();
+        uint256 afterBefore = hook.afterCount();
+        core.claimRefund(jobId, hex"f00d");
+
+        assertEq(hook.lastSelector(), core.claimRefund.selector);
+        assertEq(hook.beforeCount(), beforeBefore + 1);
+        assertEq(hook.afterCount(), afterBefore + 1);
+        assertEq(hook.lastData(), abi.encode(address(this), bytes(hex"f00d")));
+        assertEq(usdc.balanceOf(client), TWENTY_USDC);
+    }
+
+    // a reverting hook blocks the refund (accepted fund-lock risk); admin detach recovers it
+    function test_claimRefund_revertingHookLocksFundsThenDetachRecovers() public {
+        SelectiveRevertHook hook = new SelectiveRevertHook(ERC8183.claimRefund.selector);
+        vm.prank(deployer);
+        core.setHookWhitelist(address(hook), true);
+
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, _futureExpiry(), "hooked", address(hook), 0, "");
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TEN_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, address(usdc), TEN_USDC, "");
+
+        vm.warp(block.timestamp + 3601);
+
+        // Hook blocks the refund: funds are locked in escrow.
+        vm.expectRevert(bytes("blocked"));
+        core.claimRefund(jobId, "");
+        assertEq(usdc.balanceOf(address(core)), TEN_USDC);
+
+        // Admin severs the bad hook; refund now succeeds.
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = jobId;
+        vm.prank(deployer);
+        core.batchDetachHook(ids);
+
+        uint256 balBefore = usdc.balanceOf(client);
+        core.claimRefund(jobId, "");
+        assertEq(usdc.balanceOf(client), balBefore + TEN_USDC);
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Expired));
+    }
+
+    // Break-glass: if a hook blocks the refund, admin pause() + forceRefund pays the client
+    // and expires the job in one step, bypassing the hook. This is the governance backstop
+    // for refund liveness.
+    function test_claimRefund_blockedByHook_adminForceRefundRecovers() public {
+        SelectiveRevertHook hook = new SelectiveRevertHook(ERC8183.claimRefund.selector);
+        vm.prank(deployer);
+        core.setHookWhitelist(address(hook), true);
+
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, _futureExpiry(), "hooked", address(hook), 0, "");
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TEN_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, address(usdc), TEN_USDC, "");
+
+        vm.warp(block.timestamp + 3601);
+
+        // Hook blocks the permissionless refund.
+        vm.expectRevert(bytes("blocked"));
+        core.claimRefund(jobId, "");
+        assertEq(usdc.balanceOf(address(core)), TEN_USDC);
+
+        // Break-glass: admin pauses and force-refunds the job, bypassing the hook.
+        uint256 balBefore = usdc.balanceOf(client);
+        vm.startPrank(deployer);
+        core.pause();
+        core.forceRefund(jobId, address(0));
+        vm.stopPrank();
+
+        assertEq(usdc.balanceOf(client), balBefore + TEN_USDC);
+        assertEq(usdc.balanceOf(address(core)), 0);
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Expired));
+    }
+
+    // Regression: a rescued job can never be refunded a second time — forceRefund expires the
+    // job atomically with the payout, so a later hook detach + claimRefund cannot double-pay
+    // out of other jobs' escrow.
+    function test_forceRefund_rescuedJobCannotBeRefundedAgain() public {
+        SelectiveRevertHook hook = new SelectiveRevertHook(ERC8183.claimRefund.selector);
+        vm.prank(deployer);
+        core.setHookWhitelist(address(hook), true);
+
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, _futureExpiry(), "hooked", address(hook), 0, "");
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TEN_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, address(usdc), TEN_USDC, "");
+
+        vm.warp(block.timestamp + 3601);
+
+        vm.startPrank(deployer);
+        core.pause();
+        core.forceRefund(jobId, address(0));
+        core.unpause();
+
+        // Even after the hook is detached, the permissionless path cannot pay again.
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = jobId;
+        core.batchDetachHook(ids);
+        vm.stopPrank();
+
+        vm.expectRevert(ERC8183.WrongStatus.selector);
+        core.claimRefund(jobId, "");
+    }
+
+    // The destination override: when job.client is an intermediary contract whose (blocked)
+    // forwarding hook was the only way funds could move onward, the admin can pay the
+    // ultimate beneficiary directly instead of re-stranding the refund in the intermediary.
+    function test_forceRefund_canRedirectToChosenRecipient() public {
+        SelectiveRevertHook hook = new SelectiveRevertHook(ERC8183.claimRefund.selector);
+        vm.prank(deployer);
+        core.setHookWhitelist(address(hook), true);
+
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, _futureExpiry(), "hooked", address(hook), 0, "");
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TEN_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, address(usdc), TEN_USDC, "");
+
+        vm.warp(block.timestamp + 3601);
+
+        address beneficiary = makeAddr("ultimateBeneficiary");
+        vm.startPrank(deployer);
+        core.pause();
+        core.forceRefund(jobId, beneficiary);
+        vm.stopPrank();
+
+        assertEq(usdc.balanceOf(beneficiary), TEN_USDC);
+        assertEq(usdc.balanceOf(address(core)), 0);
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Expired));
+    }
+
+    // A rescue must be distinguishable from a normal refund in the event stream alone.
+    function test_forceRefund_emitsForceRefundedForAttribution() public {
+        SelectiveRevertHook hook = new SelectiveRevertHook(ERC8183.claimRefund.selector);
+        vm.prank(deployer);
+        core.setHookWhitelist(address(hook), true);
+
+        vm.prank(client);
+        uint256 jobId = core.createJob(provider, evaluator, _futureExpiry(), "hooked", address(hook), 0, "");
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TEN_USDC, "");
+        vm.prank(client);
+        core.fund(jobId, address(usdc), TEN_USDC, "");
+
+        vm.warp(block.timestamp + 3601);
+
+        address beneficiary = makeAddr("ultimateBeneficiary");
+        vm.startPrank(deployer);
+        core.pause();
+
+        vm.expectEmit(true, true, false, true);
+        emit ERC8183.Refunded(jobId, beneficiary, TEN_USDC);
+        vm.expectEmit(true, true, true, true);
+        emit ERC8183.ForceRefunded(jobId, deployer, beneficiary, TEN_USDC);
+        core.forceRefund(jobId, beneficiary);
+        vm.stopPrank();
+    }
+
+    function test_forceRefund_revertsWhenNotPaused() public {
+        uint256 jobId = _createFundedJob(TEN_USDC);
+        vm.warp(block.timestamp + 3601);
+
+        vm.prank(deployer);
+        vm.expectRevert(PausableUpgradeable.ExpectedPause.selector);
+        core.forceRefund(jobId, address(0));
+    }
+
+    function test_forceRefund_revertsForNonAdmin() public {
+        uint256 jobId = _createFundedJob(TEN_USDC);
+        vm.warp(block.timestamp + 3601);
+
+        vm.prank(deployer);
+        core.pause();
+
+        vm.prank(client);
+        vm.expectRevert();
+        core.forceRefund(jobId, address(0));
+    }
+
+    // forceRefund grants no power beyond claimRefund's eligibility: pre-expiry jobs cannot be
+    // force-expired by the admin.
+    function test_forceRefund_revertsBeforeExpiry() public {
+        uint256 jobId = _createFundedJob(TEN_USDC);
+
+        vm.startPrank(deployer);
+        core.pause();
+        vm.expectRevert(ERC8183.WrongStatus.selector);
+        core.forceRefund(jobId, address(0));
+        vm.stopPrank();
+    }
+
+    // A contract client forwards the refund to the real beneficiary in its afterAction hook.
+    // This is the intended reason the claimRefund hook is blocking.
+    function test_claimRefund_contractClientForwardsRefundAtomically() public {
+        address endClient = makeAddr("endClient");
+        ForwardingClient fc = new ForwardingClient(core, usdc, endClient);
+        vm.prank(deployer);
+        core.setHookWhitelist(address(fc), true);
+
+        // Fund the contract-client so it can fund the job (it is job.client and the hook).
+        usdc.mint(address(fc), TEN_USDC);
+        uint256 jobId = fc.createJob(provider, evaluator, _futureExpiry());
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TEN_USDC, "");
+        fc.fund(jobId, TEN_USDC);
+
+        vm.warp(block.timestamp + 3601);
+        core.claimRefund(jobId, "");
+
+        // Refund landed at the contract-client and was atomically forwarded to the real client.
+        assertEq(usdc.balanceOf(endClient), TEN_USDC);
+        assertEq(usdc.balanceOf(address(fc)), 0);
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Expired));
+    }
+
+    // If the contract client's forward fails, the entire refund MUST roll back — funds are
+    // never stranded in the intermediary. This is why the hook is intentionally blocking.
+    function test_claimRefund_contractClientFailedForwardRevertsEntireRefund() public {
+        address endClient = makeAddr("endClient");
+        ForwardingClient fc = new ForwardingClient(core, usdc, endClient);
+        vm.prank(deployer);
+        core.setHookWhitelist(address(fc), true);
+
+        usdc.mint(address(fc), TEN_USDC);
+        uint256 jobId = fc.createJob(provider, evaluator, _futureExpiry());
+        vm.prank(provider);
+        core.setBudget(jobId, address(usdc), TEN_USDC, "");
+        fc.fund(jobId, TEN_USDC);
+
+        fc.setFailForward(true);
+        vm.warp(block.timestamp + 3601);
+
+        vm.expectRevert(bytes("forward failed"));
+        core.claimRefund(jobId, "");
+
+        // Whole tx rolled back: job still Funded, escrow intact, nothing forwarded.
+        assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Funded));
+        assertEq(usdc.balanceOf(address(core)), TEN_USDC);
+        assertEq(usdc.balanceOf(endClient), 0);
     }
 }

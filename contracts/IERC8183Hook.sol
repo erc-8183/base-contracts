@@ -21,7 +21,12 @@ import "@openzeppelin/contracts/utils/introspection/IERC165.sol";
  *      `data` according to the hook encoding documented for each selector.
  */
 interface IERC8183Hook is IERC165 {
-    /// @dev Called before the core function executes. MAY revert to block the action.
+    /// @dev Called before the core function's primary state transition. MAY revert to block the action.
+    ///      Ordering guarantee: no primary state change for this action has occurred yet when
+    ///      beforeAction runs. Exception: for `submit` and `reject`, any pending milestone claim is
+    ///      first superseded (its pendingClaimHash is cleared and a ClaimRejected event is emitted)
+    ///      *before* beforeAction fires, so a hook observes the post-supersede claim state.
+    ///      Note: `createJob` is afterAction-only and never invokes beforeAction.
     /// @param jobId The job ID.
     /// @param selector The function selector of the core function being called.
     /// @param data Encoded function-specific parameters (see protocol documentation for decoding).

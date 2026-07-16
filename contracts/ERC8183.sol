@@ -113,13 +113,15 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     );
     /// @notice Emitted when a provider is assigned to a job
     event ProviderSet(
-        uint256 indexed jobId, 
-        address indexed provider, 
+        uint256 indexed jobId,
+        address indexed actor,
+        address indexed provider,
         uint256 agentId
     );
     /// @notice Emitted when the payout receiver for a job is set or updated
     event PayoutReceiverSet(
         uint256 indexed jobId,
+        address indexed actor,
         address indexed payoutReceiver
     );
     /// @notice Emitted when onDisbursement is invoked for a receiver that advertises IDisburser
@@ -131,8 +133,9 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     );
     /// @notice Emitted when the provider sets or updates the job budget
     event BudgetSet(
-        uint256 indexed jobId, 
-        address indexed token, 
+        uint256 indexed jobId,
+        address indexed actor,
+        address indexed token,
         uint256 amount
     );
     /// @notice Emitted when the client funds the job escrow
@@ -181,10 +184,18 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         address indexed evaluator,
         uint256 amount
     );
-    /// @notice Emitted when escrowed funds are returned to the client
+    /// @notice Emitted when escrowed funds are refunded; recipient is the client except under a forceRefund destination override
     event Refunded(
         uint256 indexed jobId,
-        address indexed client,
+        address indexed recipient,
+        uint256 amount
+    );
+    /// @notice Emitted alongside Refunded when forceRefund pays out, attributing the admin
+    ///         and chosen recipient
+    event ForceRefunded(
+        uint256 indexed jobId,
+        address indexed admin,
+        address indexed recipient,
         uint256 amount
     );
     /// @notice Emitted on each successful partial settlement
@@ -508,6 +519,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     /// @param description Human-readable job description
     /// @param hook Hook contract address (address(0) = no hook, must be whitelisted)
     /// @param providerAgentId Optional ERC-8004 agent identity for provider
+    /// @param optParams Hook-specific parameters (passed to the afterAction hook)
     /// @return The new job ID
     function createJob(
         address provider,
@@ -515,9 +527,10 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         uint48 expiredAt,
         string calldata description,
         address hook,
-        uint256 providerAgentId
+        uint256 providerAgentId,
+        bytes calldata optParams
     ) external whenNotPaused nonReentrant returns (uint256) {
-        return _createJob(msg.sender, provider, evaluator, expiredAt, description, hook, providerAgentId);
+        return _createJob(msg.sender, provider, evaluator, expiredAt, description, hook, providerAgentId, optParams);
     }
 
     function _createJob(
@@ -527,7 +540,8 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         uint48 expiredAt,
         string calldata description,
         address hook,
-        uint256 providerAgentId
+        uint256 providerAgentId,
+        bytes calldata optParams
     ) internal returns (uint256) {
         if (client == address(0)) revert ZeroAddress();
         if (expiredAt <= block.timestamp + 5 minutes) revert ExpiryTooShort();
@@ -555,6 +569,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
             budget: 0,
             hook: hook,
             paymentToken: address(0),
+            // A providerless job has no provider to attribute, so its agent id is zero.
             providerAgentId: provider != address(0) ? providerAgentId : 0,
             description: description,
             settledAmount: 0,
@@ -569,6 +584,20 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
             expiredAt,
             hook
         );
+
+        // afterAction only: the hook is now attached and the job exists, so it can
+        // initialize per-job bookkeeping or revert to reject a job it will not service.
+        // No beforeAction — there is no attached hook before creation, and attachment
+        // is already gated by the whitelist + ERC-165 check above.
+        // The payload reads providerAgentId back from storage so the hook never sees an
+        // agent id that disagrees with jobs[jobId] (e.g. a providerless job canonicalizes to 0).
+        _afterHook(
+            hook,
+            jobId,
+            this.createJob.selector,
+            abi.encode(client, provider, evaluator, expiredAt, hook, jobs[jobId].providerAgentId, optParams)
+        );
+
         return jobId;
     }
 
@@ -576,29 +605,57 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     ///         Locked once the job is funded.
     /// @param jobId The job to update
     /// @param payoutReceiver New payout receiver (address(0) = pay provider directly)
-    function setPayoutReceiver(uint256 jobId, address payoutReceiver) external whenNotPaused nonReentrant {
-        _setPayoutReceiver(msg.sender, jobId, payoutReceiver);
+    /// @param optParams Hook-specific parameters (passed to before/after hooks)
+    function setPayoutReceiver(uint256 jobId, address payoutReceiver, bytes calldata optParams)
+        external
+        whenNotPaused
+        nonReentrant
+    {
+        _setPayoutReceiver(msg.sender, jobId, payoutReceiver, optParams);
     }
 
-    function _setPayoutReceiver(address actor, uint256 jobId, address payoutReceiver) internal {
+    function _setPayoutReceiver(
+        address actor,
+        uint256 jobId,
+        address payoutReceiver,
+        bytes calldata optParams
+    ) internal {
         Job storage job = jobs[jobId];
         if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
         if (block.timestamp >= job.expiredAt) revert WrongStatus();
         if (actor != job.provider) revert Unauthorized();
         _validatePayoutReceiver(payoutReceiver, job.paymentToken);
+
+        bytes memory data = abi.encode(actor, payoutReceiver, optParams);
+        _beforeHook(job.hook, jobId, this.setPayoutReceiver.selector, data);
+
         job.payoutReceiver = payoutReceiver;
-        emit PayoutReceiverSet(jobId, payoutReceiver);
+        emit PayoutReceiverSet(jobId, actor, payoutReceiver);
+
+        _afterHook(job.hook, jobId, this.setPayoutReceiver.selector, data);
     }
 
     /// @notice Assigns a provider to an Open job that has no provider yet. Client only.
     /// @param jobId The job to assign a provider to
     /// @param provider_ The provider address
-    function setProvider(uint256 jobId, address provider_, uint256 agentId) external whenNotPaused nonReentrant {
-        _setProvider(msg.sender, jobId, provider_, agentId);
+    /// @param agentId Optional ERC-8004 agent identity for the provider
+    /// @param optParams Hook-specific parameters (passed to before/after hooks)
+    function setProvider(uint256 jobId, address provider_, uint256 agentId, bytes calldata optParams)
+        external
+        whenNotPaused
+        nonReentrant
+    {
+        _setProvider(msg.sender, jobId, provider_, agentId, optParams);
     }
 
-    function _setProvider(address actor, uint256 jobId, address provider_, uint256 agentId) internal {
+    function _setProvider(
+        address actor,
+        uint256 jobId,
+        address provider_,
+        uint256 agentId,
+        bytes calldata optParams
+    ) internal {
         Job storage job = jobs[jobId];
         if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
@@ -608,9 +665,15 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         if (provider_ == address(0)) revert ZeroAddress();
         if (provider_ == job.client) revert ClientCannotBeProvider();
         if (provider_ == job.evaluator) revert ProviderCannotBeEvaluator();
+
+        bytes memory data = abi.encode(actor, provider_, agentId, optParams);
+        _beforeHook(job.hook, jobId, this.setProvider.selector, data);
+
         job.provider = provider_;
         job.providerAgentId = agentId;
-        emit ProviderSet(jobId, provider_, agentId);
+        emit ProviderSet(jobId, actor, provider_, agentId);
+
+        _afterHook(job.hook, jobId, this.setProvider.selector, data);
     }
 
     /// @notice Provider sets or updates the job budget. Can be called multiple times while Open and not expired.
@@ -648,7 +711,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
 
         job.paymentToken = token;
         job.budget = amount;
-        emit BudgetSet(jobId, token, amount);
+        emit BudgetSet(jobId, actor, token, amount);
 
         _afterHook(job.hook, jobId, this.setBudget.selector, data);
     }
@@ -858,10 +921,68 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
 
     /// @notice Claims a refund for an expired job. Anyone can call.
     ///         Transitions Open/Funded/Submitted -> Expired after expiry time.
-    ///         Not hookable; pending claims must still be resolved before refund.
+    ///         Pending claims must still be resolved before refund.
+    /// @dev    Hookable, and intentionally BLOCKING. The refund is paid to `job.client`,
+    ///         which may be a contract standing in for the real beneficiary (e.g. a
+    ///         smart account or router). The `afterAction` callback runs after the refund
+    ///         transfer (see ordering below) so that client contract can atomically
+    ///         forward the funds to the rightful end-client. The callbacks therefore MAY
+    ///         revert to roll the whole refund back — this is required: a failed forward
+    ///         MUST NOT leave funds stranded in the intermediary client contract.
+    ///         Forward-or-revert is audited at whitelisting; the kernel does not verify it.
+    ///         Trade-off: this removes the unconditional post-expiry refund guarantee — a
+    ///         buggy, reverting, or gas-exhausting hook could otherwise block the refund.
+    ///         The trust model
+    ///         mitigates this: hooks are admin-whitelisted + ERC-165-checked at attach time
+    ///         and are expected to be audited as part of whitelisting to never block
+    ///         lifecycle paths (i.e. never revert on claimRefund except for a genuine
+    ///         forward failure, never consume unbounded gas) and to
+    ///         never derive routing/authorization from the
+    ///         caller-supplied optParams on this permissionless path. Break-glass recovery if
+    ///         a hook still blocks a refund: batchDetachHook for a non-forwarding hook (after
+    ///         which claimRefund proceeds with no callbacks), or admin forceRefund, which
+    ///         refunds and expires the job in one step while bypassing hooks. emergencyWithdraw
+    ///         is reserved for funds NOT attributed to any job (e.g. stray transfers) — using
+    ///         it for a job-tied refund leaves the job Funded and refundable a second time.
     /// @param jobId The expired job to claim refund for
-    function claimRefund(uint256 jobId) external whenNotPaused nonReentrant {
-        Job storage job = jobs[jobId];
+    /// @param optParams Hook-specific parameters (passed to before/after hooks)
+    function claimRefund(uint256 jobId, bytes calldata optParams) external whenNotPaused nonReentrant {
+        Job storage job = _validateRefundEligibility(jobId);
+
+        bytes memory data = abi.encode(msg.sender, optParams);
+        _beforeHook(job.hook, jobId, this.claimRefund.selector, data);
+
+        _expireWithRefund(jobId, job, job.client);
+
+        _afterHook(job.hook, jobId, this.claimRefund.selector, data);
+    }
+
+    /// @notice Admin break-glass: refunds and expires a job whose hook blocks claimRefund,
+    ///         bypassing hook callbacks. Requires the contract to be paused.
+    /// @dev    Grants no state-transition power beyond the permissionless path: eligibility is
+    ///         exactly claimRefund's (post-expiry, grace period elapsed for Submitted, pending
+    ///         claims still block) — only the hook calls are skipped. Because the job
+    ///         transitions to Expired atomically with the payout, a rescued job can never be
+    ///         refunded again, which is why this MUST be used instead of emergencyWithdraw for
+    ///         job-tied funds (emergencyWithdraw moves tokens without closing the job's
+    ///         ledger entry).
+    ///         The destination override exists because job.client may itself be an
+    ///         intermediary contract (smart account, router) that cannot receive or forward
+    ///         funds without its — now blocked — hook: paying it would re-strand the refund
+    ///         outside the escrow's reach. This grants no destination power the admin does
+    ///         not already hold via emergencyWithdraw's free-form (token, to, amount).
+    /// @param jobId The expired job to rescue
+    /// @param to Refund recipient; address(0) defaults to job.client
+    function forceRefund(uint256 jobId, address to) external onlyRole(ADMIN_ROLE) whenPaused nonReentrant {
+        Job storage job = _validateRefundEligibility(jobId);
+        address recipient = to == address(0) ? job.client : to;
+        uint256 amount = _expireWithRefund(jobId, job, recipient);
+        emit ForceRefunded(jobId, msg.sender, recipient, amount);
+    }
+
+    /// @dev Shared eligibility checks for claimRefund/forceRefund.
+    function _validateRefundEligibility(uint256 jobId) internal view returns (Job storage job) {
+        job = jobs[jobId];
         if (jobId == 0 || jobId > jobCounter) revert InvalidJob();
         if (job.status != JobStatus.Open && job.status != JobStatus.Funded && job.status != JobStatus.Submitted)
             revert WrongStatus();
@@ -873,14 +994,20 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         } else {
             if (block.timestamp < job.expiredAt) revert WrongStatus();
         }
+    }
 
+    /// @dev Shared state transition for claimRefund/forceRefund: expire the job and pay the
+    ///      unsettled remainder to `recipient` (always job.client on the permissionless path).
+    ///      Returns the amount actually transferred (0 when nothing was escrowed to refund).
+    function _expireWithRefund(uint256 jobId, Job storage job, address recipient) internal returns (uint256 refunded) {
         JobStatus prev = job.status;
         job.status = JobStatus.Expired;
 
         uint256 refundAmount = job.budget - job.settledAmount;
         if (refundAmount > 0 && (prev == JobStatus.Funded || prev == JobStatus.Submitted)) {
-            IERC20(job.paymentToken).safeTransfer(job.client, refundAmount);
-            emit Refunded(jobId, job.client, refundAmount);
+            IERC20(job.paymentToken).safeTransfer(recipient, refundAmount);
+            emit Refunded(jobId, recipient, refundAmount);
+            refunded = refundAmount;
         }
 
         emit JobExpired(jobId);

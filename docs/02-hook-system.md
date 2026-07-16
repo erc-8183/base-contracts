@@ -25,9 +25,9 @@ interface IERC8183Hook is IERC165 {
 
 | Core function | Hooked? | Notes |
 |---------------|---------|-------|
-| `createJob`   | **No**  | Hook is stored on the job, but no callbacks fire on creation. |
-| `setPayoutReceiver` | **No** | Provider-side payout routing is set while Open; no hook callbacks. |
-| `setProvider` | **No**  | Client-only assignment of the provider. |
+| `createJob`   | **Yes (afterAction only)** | Hook is attached during creation, so only `afterAction` fires — the hook can initialize per-job bookkeeping or revert to reject the job. No `beforeAction`: no attached hook exists before creation, and attachment is already gated by the whitelist + ERC-165 check. |
+| `setPayoutReceiver` | Yes | before + after |
+| `setProvider` | Yes     | before + after |
 | `setBudget`   | Yes     | before + after |
 | `fund`        | Yes     | before + after |
 | `submit`      | Yes     | before + after |
@@ -37,7 +37,7 @@ interface IERC8183Hook is IERC165 {
 | `rejectClaim` | Yes    | before + after |
 | `complete`    | Yes     | before + after |
 | `reject`      | Yes     | before + after |
-| `claimRefund` | **No**  | Permissionless safety mechanism — never hookable. |
+| `claimRefund` | Yes     | before + after. Permissionless refund path — see the fund-lock caveat below. |
 
 ## Data Encoding per Selector
 
@@ -45,17 +45,75 @@ As produced by `ERC8183`:
 
 | Selector    | `data` encoding                                                              |
 |-------------|------------------------------------------------------------------------------|
-| `setBudget` | `abi.encode(address caller, address token, uint256 amount, bytes optParams)` |
-| `fund`      | `abi.encode(address caller, bytes optParams)`                                |
-| `submit`    | `abi.encode(address caller, bytes32 deliverable, bytes optParams)`           |
-| `submitClaim` | `abi.encode(address caller, uint256 cumulativeAmount, bytes32 deliverable, bytes optParams)` |
-| `settleClaim` | `abi.encode(address caller, uint256 cumulativeAmount, bytes32 deliverable, bytes optParams)` |
-| `approveClaim` | `abi.encode(address caller, uint256 cumulativeAmount, bytes32 deliverable, bytes optParams)` |
-| `rejectClaim` | `abi.encode(address caller, uint256 cumulativeAmount, bytes32 deliverable, bytes32 reason, bytes optParams)` |
-| `complete`  | `abi.encode(address caller, bytes32 reason, bytes optParams)`                |
-| `reject`    | `abi.encode(address caller, bytes32 reason, bytes optParams)`                |
+| `createJob` | `abi.encode(address actor, address provider, address evaluator, uint48 expiredAt, address hook, uint256 providerAgentId, bytes optParams)` |
+| `setProvider` | `abi.encode(address actor, address provider, uint256 agentId, bytes optParams)` |
+| `setPayoutReceiver` | `abi.encode(address actor, address payoutReceiver, bytes optParams)` |
+| `setBudget` | `abi.encode(address actor, address token, uint256 amount, bytes optParams)` |
+| `fund`      | `abi.encode(address actor, bytes optParams)`                                |
+| `submit`    | `abi.encode(address actor, bytes32 deliverable, bytes optParams)`           |
+| `submitClaim` | `abi.encode(address actor, uint256 cumulativeAmount, bytes32 deliverable, bytes optParams)` |
+| `settleClaim` | `abi.encode(address actor, uint256 cumulativeAmount, bytes32 deliverable, bytes optParams)` |
+| `approveClaim` | `abi.encode(address actor, uint256 cumulativeAmount, bytes32 deliverable, bytes optParams)` |
+| `rejectClaim` | `abi.encode(address actor, uint256 cumulativeAmount, bytes32 deliverable, bytes32 reason, bytes optParams)` |
+| `complete`  | `abi.encode(address actor, bytes32 reason, bytes optParams)`                |
+| `reject`    | `abi.encode(address actor, bytes32 reason, bytes optParams)`                |
+| `claimRefund` | `abi.encode(address actor, bytes optParams)`                              |
 
-All payloads include `address caller` so the hook knows who initiated the transition.
+All payloads begin with `address actor` so the hook knows who authorized the transition.
+For direct calls `actor` is `msg.sender`; for `*WithAuthorization` calls it is the EIP-712
+signer; for the permissionless `claimRefund` it is `msg.sender` (whoever triggered the refund).
+
+> **`claimRefund` is intentionally a blocking hook.** The refund is paid to `job.client`,
+> which may be a contract standing in for the real beneficiary (e.g. a smart account or
+> router). `claimRefund`'s `afterAction` runs *after* the refund transfer, so that client
+> contract can atomically forward the funds to the rightful end-client. The callback must be
+> able to revert the whole refund — a failed forward must not strand funds in the intermediary.
+>
+> The accepted trade-off: as the permissionless recovery path, a buggy or fail-closed hook
+> that reverts on `claimRefund` can block the refund and lock escrowed funds. This is handled
+> by a governance trust model:
+> - Hooks are admin-whitelisted only after an **audit confirming they do not block lifecycle
+>   paths** — a whitelisted hook MUST NOT revert on `claimRefund` except for a genuine forward
+>   failure, and MUST NOT derive routing/authorization from the caller-supplied `optParams`
+>   on this permissionless path (anyone can trigger `claimRefund`).
+> - **Break-glass recovery:** if a hook still blocks a refund, the admin can `pause()` and
+>   `forceRefund` the job — same eligibility as `claimRefund` but with hook callbacks skipped,
+>   paying the refund and expiring the job atomically (so it can never be refunded twice). The
+>   recipient defaults to the client but can be overridden: a contract-client that depended on
+>   its now-blocked hook to forward funds may be unable to receive them, and paying it would
+>   re-strand the refund (the override adds no power the admin lacks via `emergencyWithdraw`);
+>   `batchDetachHook` is the lighter option for a non-forwarding hook (after which
+>   `claimRefund` succeeds with no callbacks). `emergencyWithdraw` is reserved for funds not
+>   attributed to any job (e.g. stray transfers) — it moves tokens without closing a job's
+>   ledger entry, so it MUST NOT be used for job-tied refunds.
+>
+> Only whitelist hooks you fully trust and have audited. Deployments that don't need
+> contract-client forwarding and want an unconditional, trust-minimized refund should attach
+> no hook on such jobs.
+
+The forwarding flow, concretely (the `ForwardingClient` in the test suite demonstrates it):
+
+```
+claimRefund(jobId)
+  ├─ status -> Expired
+  ├─ transfer (budget - settledAmount) to job.client      // the client *contract*
+  └─ afterAction(jobId, claimRefund.selector, data)        // runs AFTER the transfer
+       └─ job.client forwards the received funds to the real end-beneficiary
+          └─ if the forward reverts, the whole claimRefund reverts:
+             escrow stays put, nothing is stranded in job.client
+```
+
+Because the callback runs after the transfer and can revert the whole call, the refund and
+the onward forward are atomic. A hook attached to such a job MUST handle the `claimRefund`
+selector (forward, or no-op) and MUST NOT revert on it for reasons unrelated to a genuine
+forward failure — otherwise it permanently blocks the only refund path until `batchDetachHook`.
+
+### Signed-authorization note
+
+The `optParams` for `createJob`, `setProvider`, and `setPayoutReceiver` are bound into their
+EIP-712 authorization typehashes via an `optParamsHash` field (matching `setBudget`/`fund`/etc.).
+Adding `optParams` changed these three typehashes, so any authorization signatures produced
+against the previous typehashes are no longer valid.
 
 ## How Hooks Attach to Jobs
 
@@ -150,7 +208,7 @@ The core passes canonical base-function selectors such as `this.fund.selector`, 
 - Hooks MUST NOT be able to change job state outside of defined transitions — they observe and gate, they do not write to `jobs[jobId]`.
 - `beforeAction` can revert to gate transitions — this is intentional and by design.
 - `afterAction` reverts roll back the whole transaction — hook state must stay consistent with core state.
-- `claimRefund` is intentionally not hookable, but it still requires pending provider claims to be resolved first.
+- `claimRefund` is hookable (before + after), but because it is the permissionless escrow recovery path, a reverting hook can block the refund and lock escrowed funds — mitigate via the whitelist/ERC-165 attach checks and `batchDetachHook` (see the fund-lock caveat above). It still requires pending provider claims to be resolved first.
 - `settleClaim` can run while a provider claim is pending; it updates cumulative settlement but does not close the pending claim lifecycle.
 - `approveClaim` and `rejectClaim` are hookable resolution actions; trusted hooks can gate them like other business transitions.
 - When `submit` supersedes a pending claim, the pending claim is cleared before submit hooks run so hooks observe the post-supersede state.
