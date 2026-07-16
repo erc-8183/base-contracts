@@ -1697,9 +1697,7 @@ contract ERC8183Test is Test {
         assertEq(uint8(core.getJob(jobId).status), uint8(ERC8183.JobStatus.Expired));
     }
 
-    // Observability: a break-glass rescue must be distinguishable from a normal client refund
-    // in the event stream alone. forceRefund emits ForceRefunded (attributing the acting admin
-    // and the chosen recipient) alongside the generic Refunded.
+    // A rescue must be distinguishable from a normal refund in the event stream alone.
     function test_forceRefund_emitsForceRefundedForAttribution() public {
         SelectiveRevertHook hook = new SelectiveRevertHook(ERC8183.claimRefund.selector);
         vm.prank(deployer);
