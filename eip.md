@@ -32,7 +32,7 @@ A **job** has exactly one of six states:
 
 | State         | Meaning                                                                                                           |
 | ------------- | ----------------------------------------------------------------------------------------------------------------- |
-| **Open**      | Created; budget not yet set or not yet funded. Client may set budget, then fund or reject.                        |
+| **Open**      | Created; budget not yet set or not yet funded. Provider may propose a budget via `setBudget`; client may then fund, and either party may reject. |
 | **Funded**    | Budget escrowed. Provider may submit work or file a settlement claim; client may settle partial amounts directly or approve/reject a pending claim; evaluator may approve/reject a pending claim or reject the job. After `expiredAt`, anyone may trigger refund of the unsettled remainder (`budget - settledAmount`, see [Job Data](#job-data)), provided no claim is pending. |
 | **Submitted** | Provider has submitted work. Only evaluator may complete or reject. After `expiredAt + EVALUATION_GRACE_PERIOD`, anyone may trigger refund. |
 | **Completed** | Terminal. Unsettled remainder released to provider (minus optional fees).                                         |
@@ -45,6 +45,7 @@ Allowed transitions:
 - **Open → Funded**: Provider calls `setBudget(jobId, token, amount)` to propose the price and payment token, then client accepts by calling `fund(jobId, expectedToken, expectedBudget)`; contract pulls `job.budget` of the job's payment token from client into escrow.
 - **Open → Rejected**: Client or provider calls `reject(jobId, reason?)`.
 - **Open → Expired**: When `block.timestamp >= job.expiredAt`, anyone may call `claimRefund(jobId)`; contract sets state to Expired. No refund to client as job has not been funded yet.
+- **Open → Submitted**: zero-budget jobs only (`budget == 0`, no escrow): provider calls `submit(jobId, deliverable)` directly from Open (see `submit` under [Core Functions](#core-functions)).
 - **Funded → Submitted**: Provider calls `submit(jobId, deliverable)`; signals that work has been completed and is ready for evaluation.
 - **Funded → Rejected**: Evaluator calls `reject(jobId, reason?)`; contract refunds client.
 - **Funded → Expired**: When `block.timestamp >= job.expiredAt`, anyone may call `claimRefund(jobId)`; contract sets state to Expired and refunds client.
@@ -93,7 +94,7 @@ SHALL revert if `job.provider == address(0)` (provider MUST be set before fundin
 ### Core Functions
 
 - **createJob(provider, evaluator, expiredAt, description, hook?, providerAgentId?)**
-Called by client. Creates job in Open with `client = msg.sender`, `provider`, `evaluator`, `expiredAt`, `description`, optional `hook` address, and default `payoutReceiver = address(0)`. SHALL revert if `evaluator` is zero, if `expiredAt` is not at least 5 minutes in the future, if `provider == evaluator`, or if `msg.sender == provider`. **Provider MAY be zero**; if so, client MUST call `setProvider` before `fund`. `hook` MAY be `address(0)` (no hook); if non-zero, the hook MUST be admin-whitelisted and SHOULD advertise support for the `IERC8183Hook` interface via ERC-165. `providerAgentId` is the provider's [ERC-8004](./eip-8004.md) agent identity; if `provider` is non-zero and `providerAgentId` is non-zero, SHALL set `job.providerAgentId = providerAgentId`; the contract MAY verify that `provider` is the owner or operator of that `providerAgentId` on the ERC-8004 registry. Returns `jobId`.
+Called by client. Creates job in Open with `client = msg.sender`, `provider`, `evaluator`, `expiredAt`, `description`, optional `hook` address, and default `payoutReceiver = address(0)`. SHALL revert if `evaluator` is zero, if `expiredAt <= block.timestamp + 5 minutes`, if `provider == evaluator`, or if `msg.sender == provider`. **Provider MAY be zero**; if so, client MUST call `setProvider` before `fund`. `hook` MAY be `address(0)` (no hook); if non-zero, the hook MUST be admin-whitelisted and SHOULD advertise support for the `IERC8183Hook` interface via ERC-165. `providerAgentId` is the provider's [ERC-8004](./eip-8004.md) agent identity; if `provider` is non-zero and `providerAgentId` is non-zero, SHALL set `job.providerAgentId = providerAgentId`; the contract MAY verify that `provider` is the owner or operator of that `providerAgentId` on the ERC-8004 registry. Returns `jobId`.
 - **setPayoutReceiver(jobId, payoutReceiver)**
 Called by provider. SHALL revert if job is not Open, the job has expired, caller is not the job's provider, `payoutReceiver` is the escrow contract itself, or the payment token is already set and `payoutReceiver == job.paymentToken`. SHALL set the provider-side payout recipient for the job. `payoutReceiver` MAY be `address(0)` to pay the provider directly. Implementations SHOULD emit `PayoutReceiverSet`.
 - **setProvider(jobId, provider, agentId?)**
