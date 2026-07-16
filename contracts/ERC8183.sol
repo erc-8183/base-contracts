@@ -190,6 +190,15 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         address indexed client,
         uint256 amount
     );
+    /// @notice Emitted alongside Refunded when the admin break-glass forceRefund expires a
+    ///         job, attributing the acting admin and the (possibly overridden) recipient so
+    ///         event-stream indexers can distinguish an admin rescue from a client refund
+    event ForceRefunded(
+        uint256 indexed jobId,
+        address indexed admin,
+        address indexed recipient,
+        uint256 amount
+    );
     /// @notice Emitted on each successful partial settlement
     event Settled(
         uint256 indexed jobId,
@@ -964,7 +973,9 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     /// @param to Refund recipient; address(0) defaults to job.client
     function forceRefund(uint256 jobId, address to) external onlyRole(ADMIN_ROLE) whenPaused nonReentrant {
         Job storage job = _validateRefundEligibility(jobId);
-        _expireWithRefund(jobId, job, to == address(0) ? job.client : to);
+        address recipient = to == address(0) ? job.client : to;
+        uint256 amount = _expireWithRefund(jobId, job, recipient);
+        emit ForceRefunded(jobId, msg.sender, recipient, amount);
     }
 
     /// @dev Shared eligibility checks for claimRefund/forceRefund.
@@ -985,7 +996,8 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
 
     /// @dev Shared state transition for claimRefund/forceRefund: expire the job and pay the
     ///      unsettled remainder to `recipient` (always job.client on the permissionless path).
-    function _expireWithRefund(uint256 jobId, Job storage job, address recipient) internal {
+    ///      Returns the amount actually transferred (0 when nothing was escrowed to refund).
+    function _expireWithRefund(uint256 jobId, Job storage job, address recipient) internal returns (uint256 refunded) {
         JobStatus prev = job.status;
         job.status = JobStatus.Expired;
 
@@ -993,6 +1005,7 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
         if (refundAmount > 0 && (prev == JobStatus.Funded || prev == JobStatus.Submitted)) {
             IERC20(job.paymentToken).safeTransfer(recipient, refundAmount);
             emit Refunded(jobId, recipient, refundAmount);
+            refunded = refundAmount;
         }
 
         emit JobExpired(jobId);
