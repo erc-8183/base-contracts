@@ -474,6 +474,11 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
 
     /// @dev Only receivers with deployed code can receive the optional callback.
     ///      EOAs and contracts that do not advertise IDisburser are plain recipients.
+    ///      The callback is intentionally blocking (a revert rolls back the settlement,
+    ///      per the spec) and is not gas-bounded: a receiver that reverts or consumes
+    ///      unbounded gas in onDisbursement blocks its own settlement. The receiver is
+    ///      provider-chosen, so this is provider-controlled risk — the evaluator can
+    ///      reject instead, which refunds the client through a path with no callback.
     function _isDisburser(address receiver) internal view returns (bool) {
         return receiver.code.length > 0 && ERC165Checker.supportsInterface(
             receiver,
@@ -930,12 +935,19 @@ contract ERC8183 is Initializable, AccessControlUpgradeable, PausableUpgradeable
     ///         forward the funds to the rightful end-client. The callbacks therefore MAY
     ///         revert to roll the whole refund back — this is required: a failed forward
     ///         MUST NOT leave funds stranded in the intermediary client contract.
+    ///         Forward-or-revert is the hook's obligation, not a kernel invariant: the
+    ///         kernel does not verify that funds moved onward, so a no-op afterAction
+    ///         finalizes the job (Expired, irreversible) with the refund left in the
+    ///         intermediary. Verifying forwarding behavior is part of the whitelist audit.
     ///         Trade-off: this removes the unconditional post-expiry refund guarantee — a
-    ///         buggy/reverting hook could otherwise block the refund. The trust model
+    ///         buggy, reverting, or gas-exhausting hook could otherwise block the refund
+    ///         (unbounded gas consumption blocks the call exactly like a revert, with no
+    ///         revert reason to signal it). The trust model
     ///         mitigates this: hooks are admin-whitelisted + ERC-165-checked at attach time
     ///         and are expected to be audited as part of whitelisting to never block
     ///         lifecycle paths (i.e. never revert on claimRefund except for a genuine
-    ///         forward failure) and to never derive routing/authorization from the
+    ///         forward failure, never consume unbounded gas on any hooked selector) and to
+    ///         never derive routing/authorization from the
     ///         caller-supplied optParams on this permissionless path. Break-glass recovery if
     ///         a hook still blocks a refund: batchDetachHook for a non-forwarding hook (after
     ///         which claimRefund proceeds with no callbacks), or admin forceRefund, which
